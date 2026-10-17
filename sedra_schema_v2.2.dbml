@@ -1,0 +1,962 @@
+// =====================================================================
+// Sedra Petrol - Buildings & Utilities Management + Accounting
+// Schema v2.2 (fixes v2.1 review)  |  Target: PostgreSQL
+// Paste into https://dbdiagram.io to render the ER diagram.
+//
+// CONVENTIONS (apply to EVERY table, omitted below for readability):
+//   created_at timestamptz not null default now()
+//   created_by bigint  -> app_user.id
+//   updated_at timestamptz
+//   updated_by bigint  -> app_user.id
+//   is_deleted boolean not null default false
+// All *_status_id / *_type_id columns -> lookup_value.id (see LOOKUP_TYPE codes in notes)
+// Money: decimal(14,2). Quantities: decimal(14,3). Rates: decimal(18,6).
+// =====================================================================
+
+Project sedra_petrol {
+  database_type: 'PostgreSQL'
+  Note: 'v2.2 - source of truth for the DB. Regenerate the diagram from this file; do not edit images.'
+}
+
+// ---------------------------------------------------------------------
+// 1. ORGANIZATION & LOCATION
+// ---------------------------------------------------------------------
+Table company {
+  id bigint [pk, increment]
+  code varchar(20) [unique, not null]
+  name_en varchar(200) [not null]
+  name_ar varchar(200) [not null]
+  address text
+  trn varchar(20) [note: 'UAE VAT Tax Registration Number']
+  logo_path varchar(500) [note: 'main logo file (storage path/URL) - used on invoices, receipts, portal header']
+  logo_dark_path varchar(500) [note: 'optional: logo for dark backgrounds']
+  stamp_path varchar(500) [note: 'optional: company stamp/seal for printed documents']
+  phone varchar(30)
+  email varchar(150)
+  website varchar(150)
+  base_currency_id bigint [ref: > currency.id]
+  is_active boolean [default: true]
+}
+
+Table country {
+  id bigint [pk, increment]
+  code char(2) [unique, not null]
+  name_en varchar(100)
+  name_ar varchar(100)
+  is_active boolean [default: true]
+}
+
+Table emirate {
+  id bigint [pk, increment]
+  country_id bigint [ref: > country.id, not null]
+  code varchar(10) [unique]
+  name_en varchar(100)
+  name_ar varchar(100)
+}
+
+Table city {
+  id bigint [pk, increment]
+  emirate_id bigint [ref: > emirate.id, not null]
+  code varchar(20) [unique]
+  name_en varchar(100)
+  name_ar varchar(100)
+  latitude decimal(9,6)
+  longitude decimal(9,6)
+  is_active boolean [default: true]
+}
+
+Table branch {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  city_id bigint [ref: > city.id]
+  code varchar(20) [unique, not null]
+  name_en varchar(200)
+  name_ar varchar(200)
+  address text
+  phone varchar(30)
+  email varchar(150)
+  logo_path varchar(500) [note: 'optional: overrides company logo for this branch']
+  is_active boolean [default: true]
+}
+
+// ---------------------------------------------------------------------
+// 2. LOOKUPS
+// ---------------------------------------------------------------------
+Table lookup_type {
+  id bigint [pk, increment]
+  code varchar(50) [unique, not null, note: 'BUILDING_TYPE, BUILDING_STATUS, UNIT_TYPE, UNIT_STATUS, METER_TYPE, METER_STATUS, METER_SERVICE_TYPE, READING_METHOD, CONTRACT_STATUS, FEE_TYPE, FEE_CYCLE, INVOICE_TYPE, INVOICE_STATUS, PAYMENT_METHOD, PAYMENT_STATUS, PARTY_TYPE, CONTACT_TYPE, VENDOR_TYPE, DOCUMENT_TYPE, TANK_STATUS, REFILL_STAGE, REFILL_STATUS, PRIORITY, SR_STATUS, VISIT_TYPE, VISIT_STATUS, VISIT_FREQUENCY, SEVERITY, AMC_TERM_TYPE, SCOPE_ITEM_TYPE, CD_CERT_TYPE, CD_STATUS, ACCOUNT_TYPE, TANK_EVENT_TYPE, NATIONALITY']
+  name_en varchar(100)
+  name_ar varchar(100)
+  description text
+  is_active boolean [default: true]
+}
+
+Table lookup_value {
+  id bigint [pk, increment]
+  lookup_type_id bigint [ref: > lookup_type.id, not null]
+  code varchar(50) [not null]
+  name_en varchar(150)
+  name_ar varchar(150)
+  parent_id bigint [ref: > lookup_value.id]
+  sort_order int [default: 0]
+  is_active boolean [default: true]
+  indexes { (lookup_type_id, code) [unique] }
+}
+
+// ---------------------------------------------------------------------
+// 3. PARTIES, VENDORS & TRANSPORT
+// ---------------------------------------------------------------------
+Table party {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id]
+  party_type_id bigint [ref: > lookup_value.id, not null, note: 'individual | company']
+  name_en varchar(200)
+  name_ar varchar(200)
+  emirates_id varchar(20) [note: 'individual']
+  nationality_id bigint [ref: > lookup_value.id]
+  trade_license_no varchar(50) [note: 'company']
+  tax_number varchar(30)
+  city_id bigint [ref: > city.id]
+  po_box varchar(20)
+  address text
+  is_active boolean [default: true]
+}
+
+Table party_contact {
+  id bigint [pk, increment]
+  party_id bigint [ref: > party.id, not null]
+  contact_type_id bigint [ref: > lookup_value.id, not null, note: 'phone | email']
+  value varchar(150) [not null]
+  is_default boolean [default: false]
+  is_active boolean [default: true]
+}
+
+Table party_bank_account {
+  id bigint [pk, increment]
+  party_id bigint [ref: > party.id, not null]
+  bank_name varchar(150)
+  account_name varchar(150)
+  iban varchar(34)
+  is_default boolean [default: false]
+  is_active boolean [default: true]
+}
+
+Table vendor {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id]
+  vendor_type_id bigint [ref: > lookup_value.id, not null, note: 'GAS_SUPPLIER | MAINTENANCE_VENDOR | SERVICE_VENDOR | OTHER']
+  code varchar(30) [unique]
+  name_en varchar(200)
+  name_ar varchar(200)
+  trade_license_no varchar(50)
+  trn varchar(20)
+  phone varchar(30)
+  email varchar(150)
+  address text
+  payable_account_id bigint [ref: > account.id]
+  is_active boolean [default: true]
+}
+
+Table vendor_contact {
+  id bigint [pk, increment]
+  vendor_id bigint [ref: > vendor.id, not null]
+  name_en varchar(150)
+  name_ar varchar(150)
+  position varchar(100) [note: 'e.g. Engineer / Technician']
+  phone varchar(30)
+  email varchar(150)
+  is_default boolean [default: false]
+  is_active boolean [default: true]
+}
+
+Table driver {
+  id bigint [pk, increment]
+  vendor_id bigint [ref: > vendor.id, note: 'null = own company driver']
+  name_en varchar(150)
+  name_ar varchar(150)
+  license_no varchar(50)
+  license_expiry date
+  hazmat_permit_no varchar(50)
+  phone varchar(30)
+  is_active boolean [default: true]
+}
+
+Table vehicle {
+  id bigint [pk, increment]
+  vendor_id bigint [ref: > vendor.id, note: 'null = own company tanker']
+  default_driver_id bigint [ref: > driver.id]
+  plate_no varchar(20) [unique, not null]
+  capacity_litres decimal(14,3)
+  registration_expiry date
+  is_active boolean [default: true]
+}
+
+// ---------------------------------------------------------------------
+// 4. USERS & SECURITY
+// ---------------------------------------------------------------------
+Table app_user {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  branch_id bigint [ref: > branch.id, note: 'home branch']
+  name_en varchar(150)
+  name_ar varchar(150)
+  email varchar(150) [unique, not null]
+  phone varchar(30)
+  password_hash varchar(255)
+  last_login_at timestamptz
+  is_active boolean [default: true]
+}
+
+Table role {
+  id bigint [pk, increment]
+  code varchar(50) [unique, not null]
+  name_en varchar(100)
+  name_ar varchar(100)
+}
+
+Table permission {
+  id bigint [pk, increment]
+  code varchar(100) [unique, not null, note: 'e.g. buildings.create, invoices.post']
+  module varchar(50)
+  name_en varchar(150)
+  name_ar varchar(150)
+  is_active boolean [default: true]
+}
+
+Table user_role {
+  user_id bigint [ref: > app_user.id]
+  role_id bigint [ref: > role.id]
+  indexes { (user_id, role_id) [pk] }
+}
+
+Table role_permission {
+  role_id bigint [ref: > role.id]
+  permission_id bigint [ref: > permission.id]
+  indexes { (role_id, permission_id) [pk] }
+}
+
+Table user_branch {
+  user_id bigint [ref: > app_user.id]
+  branch_id bigint [ref: > branch.id]
+  indexes { (user_id, branch_id) [pk] }
+}
+
+// ---------------------------------------------------------------------
+// 5. BUILDINGS & UNITS
+// ---------------------------------------------------------------------
+Table building {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  code varchar(20) [unique, not null, note: 'B-001']
+  name_en varchar(200)
+  name_ar varchar(200)
+  building_type_id bigint [ref: > lookup_value.id, note: 'residential | commercial | mixed']
+  status_id bigint [ref: > lookup_value.id, note: 'active | inactive']
+  city_id bigint [ref: > city.id]
+  zone varchar(100)
+  street varchar(150)
+  po_box varchar(20)
+  address text
+  latitude decimal(9,6)
+  longitude decimal(9,6)
+  total_floors int
+  notes text
+  is_active boolean [default: true]
+}
+
+Table building_owner {
+  id bigint [pk, increment]
+  building_id bigint [ref: > building.id, not null]
+  party_id bigint [ref: > party.id, not null]
+  ownership_percentage decimal(5,2)
+  is_primary boolean [default: false]
+  from_date date
+  to_date date
+}
+
+Table unit {
+  id bigint [pk, increment]
+  building_id bigint [ref: > building.id, not null]
+  unit_no varchar(20) [not null]
+  floor_no int
+  unit_type_id bigint [ref: > lookup_value.id, note: 'apartment | penthouse | studio | duplex | villa | commercial']
+  area_sqm decimal(10,2)
+  bedrooms smallint
+  bathrooms smallint
+  rent_amount decimal(14,2) [note: 'informational only']
+  status_id bigint [ref: > lookup_value.id, note: 'vacant | occupied | reserved | maintenance']
+  last_inspection_date date
+  notes text
+  is_active boolean [default: true]
+  indexes { (building_id, unit_no) [unique] }
+}
+
+// ---------------------------------------------------------------------
+// 6. TENANTS & SUPPLY CONTRACTS
+// ---------------------------------------------------------------------
+Table tenant {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  tenant_code varchar(20) [unique, not null]
+  name_en varchar(200)
+  name_ar varchar(200)
+  emirates_id varchar(20) [unique]
+  nationality_id bigint [ref: > lookup_value.id]
+  date_of_birth date
+  phone varchar(30)
+  email varchar(150)
+  city_id bigint [ref: > city.id]
+  address text
+  receivable_account_id bigint [ref: > account.id]
+  is_active boolean [default: true]
+}
+
+Table supply_contract {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  contract_no varchar(30) [unique, not null, note: 'single numbering scheme: GSC-YYYY-NNNN']
+  tenant_id bigint [ref: > tenant.id, not null]
+  unit_id bigint [ref: > unit.id, not null]
+  meter_id bigint [ref: > meter.id]
+  start_date date [not null]
+  end_date date
+  auto_renew boolean [default: false]
+  renewal_period_months smallint
+  deposit_amount decimal(14,2)
+  deposit_paid boolean [default: false]
+  deposit_date date
+  terms text
+  status_id bigint [ref: > lookup_value.id, note: 'draft | active | pending | expired | terminated']
+  terminated_at date
+  is_active boolean [default: true]
+  Note: 'Partial unique index: one ACTIVE contract per unit.'
+}
+
+Table contract_fee {
+  id bigint [pk, increment]
+  contract_id bigint [ref: > supply_contract.id, not null]
+  fee_type_id bigint [ref: > lookup_value.id, not null, note: 'gas_price | maintenance | connection | disconnection | inspection | meter_rent | insurance | other']
+  cycle_id bigint [ref: > lookup_value.id, not null, note: 'monthly | yearly | one_time | per_m3']
+  amount decimal(14,4) [not null]
+  currency_id bigint [ref: > currency.id]
+  effective_from date [not null]
+  effective_to date
+  notes text
+  is_active boolean [default: true]
+}
+
+// ---------------------------------------------------------------------
+// 7. METER MANAGEMENT
+// ---------------------------------------------------------------------
+Table meter {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  meter_no varchar(20) [unique, not null]
+  serial_no varchar(50) [unique, not null]
+  meter_type_id bigint [ref: > lookup_value.id, note: 'smart | standard | prepaid']
+  brand varchar(50)
+  model varchar(50)
+  sim_card_no varchar(30)
+  calibration_date date
+  install_date date
+  initial_reading decimal(14,3) [default: 0]
+  location_note varchar(200)
+  status_id bigint [ref: > lookup_value.id, note: 'active | fault | disconnected | maintenance']
+  is_active boolean [default: true]
+}
+
+Table meter_assignment {
+  id bigint [pk, increment]
+  meter_id bigint [ref: > meter.id, not null]
+  unit_id bigint [ref: > unit.id, not null]
+  from_date date [not null]
+  to_date date [note: 'null = current. Partial unique: one open row per meter and per unit']
+}
+
+Table meter_reading {
+  id bigint [pk, increment]
+  meter_id bigint [ref: > meter.id, not null]
+  reading_date timestamptz [not null]
+  reading_value decimal(14,3) [not null, note: 'cumulative m3']
+  consumption decimal(14,3) [note: 'value - previous value']
+  method_id bigint [ref: > lookup_value.id, note: 'manual | remote | customer | photo']
+  read_by bigint [ref: > app_user.id]
+  invoice_id bigint [ref: > invoice.id, note: 'set when billed; prevents double billing']
+  notes text
+  indexes { (meter_id, reading_date) }
+}
+
+Table meter_service {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  service_no varchar(30) [unique]
+  meter_id bigint [ref: > meter.id, not null]
+  contract_id bigint [ref: > supply_contract.id]
+  service_type_id bigint [ref: > lookup_value.id, not null, note: 'connect | disconnect | replace | report_issue']
+  issue_type_id bigint [ref: > lookup_value.id]
+  priority_id bigint [ref: > lookup_value.id]
+  reason text
+  requested_date date
+  completed_date date
+  before_reading decimal(14,3)
+  after_reading decimal(14,3)
+  new_meter_id bigint [ref: > meter.id, note: 'for replace']
+  safety_check_passed boolean
+  tenant_notified boolean
+  technician_id bigint [ref: > app_user.id]
+  fee_invoice_item_id bigint [ref: > invoice_item.id]
+  status_id bigint [ref: > lookup_value.id]
+}
+
+Table meter_topup {
+  id bigint [pk, increment]
+  meter_id bigint [ref: > meter.id, not null]
+  topup_date timestamptz [not null]
+  amount decimal(14,2) [not null]
+  quantity_m3 decimal(14,3)
+  payment_id bigint [ref: > payment.id]
+}
+
+// ---------------------------------------------------------------------
+// 8. TANKS & REFILL WORKFLOW
+// ---------------------------------------------------------------------
+Table gas_type {
+  id bigint [pk, increment]
+  code varchar(20) [unique, not null, note: 'LPG | NG']
+  name_en varchar(100)
+  name_ar varchar(100)
+  litre_to_m3 decimal(18,6) [not null, note: 'conversion factor for billing']
+  is_active boolean [default: true]
+}
+
+Table tank {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  building_id bigint [ref: > building.id, not null]
+  tank_no varchar(20) [not null]
+  gas_type_id bigint [ref: > gas_type.id, not null]
+  capacity_litres decimal(14,3) [not null]
+  current_level_litres decimal(14,3) [note: 'cache of latest tank_level_history']
+  serial_no varchar(50)
+  manufacturer varchar(100)
+  install_date date
+  last_inspection_date date
+  next_inspection_date date
+  status_id bigint [ref: > lookup_value.id, note: 'ok | low | maintenance | out_of_service']
+  is_active boolean [default: true]
+  indexes { (building_id, tank_no) [unique] }
+}
+
+Table tank_level_history {
+  id bigint [pk, increment]
+  tank_id bigint [ref: > tank.id, not null]
+  event_date timestamptz [not null]
+  event_type_id bigint [ref: > lookup_value.id, note: 'refill | manual_reading | sensor | adjustment']
+  level_litres decimal(14,3) [not null]
+  tank_refill_id bigint [ref: > tank_refill.id]
+  notes text
+}
+
+Table refill_request {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  request_no varchar(30) [unique, not null, note: 'RFR-YYYY-NNNN']
+  tank_id bigint [ref: > tank.id, not null]
+  request_date date [not null]
+  requested_by bigint [ref: > app_user.id]
+  requested_qty_litres decimal(14,3) [not null]
+  level_at_request_litres decimal(14,3)
+  priority_id bigint [ref: > lookup_value.id]
+  current_stage_id bigint [ref: > lookup_value.id, note: 'REFILL_STAGE 0..8']
+  status_id bigint [ref: > lookup_value.id, note: 'requested | po_issued | paid | collecting | invoiced | scheduled | delivering | pending_approval | completed | cancelled']
+  approved_by bigint [ref: > app_user.id, note: 'stage 7']
+  approved_at timestamptz
+  approval_notes text
+  completed_at timestamptz
+  notes text
+}
+
+Table refill_stage_history {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: > refill_request.id, not null]
+  from_stage_id bigint [ref: > lookup_value.id]
+  to_stage_id bigint [ref: > lookup_value.id, not null]
+  changed_by bigint [ref: > app_user.id]
+  changed_at timestamptz [not null]
+  remarks text
+}
+
+// Stage 1 - Purchase order
+Table refill_po {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: - refill_request.id, unique, not null]
+  vendor_id bigint [ref: > vendor.id, not null]
+  po_number varchar(30) [unique, not null]
+  po_date date [not null]
+  qty_litres decimal(14,3)
+  unit_price decimal(14,4)
+  total_amount decimal(14,2)
+  currency_id bigint [ref: > currency.id]
+}
+
+// Stage 2 - Supplier payment (money lives in vendor_payment)
+Table refill_supplier_payment {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: - refill_request.id, unique, not null]
+  vendor_payment_id bigint [ref: > vendor_payment.id, not null]
+}
+
+// Stage 3 - Collection at supplier
+Table refill_collection {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: - refill_request.id, unique, not null]
+  vehicle_id bigint [ref: > vehicle.id]
+  driver_id bigint [ref: > driver.id]
+  collection_date timestamptz
+  meter_before decimal(14,3)
+  meter_after decimal(14,3)
+  collected_qty_litres decimal(14,3)
+}
+
+// Stage 4 - Purchase invoice (money lives in vendor_bill)
+Table refill_purchase_invoice {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: - refill_request.id, unique, not null]
+  vendor_bill_id bigint [ref: > vendor_bill.id, not null]
+}
+
+// Stage 5 - Delivery schedule + Civil Defense confirmation
+Table refill_schedule {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: - refill_request.id, unique, not null]
+  delivery_date date [not null]
+  time_slot varchar(30)
+  civil_defense_confirmed boolean [default: false]
+  civil_defense_ref varchar(50)
+}
+
+// Stage 6 - Actual tank refill
+Table tank_refill {
+  id bigint [pk, increment]
+  refill_request_id bigint [ref: - refill_request.id, unique, not null]
+  tank_id bigint [ref: > tank.id, not null]
+  refill_datetime timestamptz [not null]
+  vehicle_id bigint [ref: > vehicle.id]
+  driver_id bigint [ref: > driver.id]
+  level_before_litres decimal(14,3)
+  level_after_litres decimal(14,3)
+  delivered_qty_litres decimal(14,3)
+  safety_check_passed boolean
+  notes text
+}
+
+// ---------------------------------------------------------------------
+// 9. AMC MAINTENANCE CONTRACTS
+// ---------------------------------------------------------------------
+Table amc_contract {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  contract_no varchar(30) [unique, not null]
+  vendor_id bigint [ref: > vendor.id, not null]
+  building_id bigint [ref: > building.id, not null]
+  owner_party_id bigint [ref: > party.id, note: 'signing owner']
+  start_date date [not null]
+  end_date date [not null]
+  annual_value decimal(14,2)
+  currency_id bigint [ref: > currency.id]
+  visit_frequency_id bigint [ref: > lookup_value.id, note: 'monthly | quarterly | semi_annual | annual']
+  visits_total smallint
+  response_time_hours smallint
+  emergency_included boolean [default: false]
+  status_id bigint [ref: > lookup_value.id, note: 'pending | active | expired']
+  notes text
+  is_active boolean [default: true]
+}
+
+Table amc_scope_item {
+  id bigint [pk, increment]
+  contract_id bigint [ref: > amc_contract.id, not null]
+  item_type_id bigint [ref: > lookup_value.id, not null, note: 'included | excluded']
+  description text [not null]
+}
+
+Table amc_term {
+  id bigint [pk, increment]
+  contract_id bigint [ref: > amc_contract.id, not null]
+  term_type_id bigint [ref: > lookup_value.id, note: 'category']
+  description text [not null]
+  is_custom boolean [default: false]
+}
+
+Table amc_payment_schedule {
+  id bigint [pk, increment]
+  contract_id bigint [ref: > amc_contract.id, not null]
+  label varchar(100)
+  due_date date [not null]
+  amount decimal(14,2) [not null]
+  status_id bigint [ref: > lookup_value.id, note: 'pending | billed | paid']
+  vendor_bill_id bigint [ref: > vendor_bill.id]
+  notes text
+}
+
+// ---------------------------------------------------------------------
+// 10. MAINTENANCE VISITS
+// ---------------------------------------------------------------------
+Table checklist_template {
+  id bigint [pk, increment]
+  visit_type_id bigint [ref: > lookup_value.id]
+  name_en varchar(150)
+  name_ar varchar(150)
+  is_active boolean [default: true]
+}
+
+Table checklist_template_item {
+  id bigint [pk, increment]
+  template_id bigint [ref: > checklist_template.id, not null]
+  item_text_en varchar(300)
+  item_text_ar varchar(300)
+  sort_order int
+}
+
+Table maintenance_visit {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  visit_no varchar(30) [unique]
+  amc_contract_id bigint [ref: > amc_contract.id, not null]
+  building_id bigint [ref: > building.id, not null]
+  visit_type_id bigint [ref: > lookup_value.id]
+  period_label varchar(20) [note: 'Q4 2026']
+  scheduled_date date [not null]
+  time_slot varchar(30)
+  visit_date date
+  vendor_contact_id bigint [ref: > vendor_contact.id, note: 'technician']
+  technician_phone varchar(30)
+  status_id bigint [ref: > lookup_value.id, note: 'scheduled | in_progress | completed | cancelled']
+  report_summary text
+  completed_at timestamptz
+  notes text
+}
+
+Table visit_checklist_item {
+  id bigint [pk, increment]
+  visit_id bigint [ref: > maintenance_visit.id, not null]
+  template_item_id bigint [ref: > checklist_template_item.id]
+  item_text varchar(300) [not null, note: 'copied from template, editable']
+  sort_order int
+  is_done boolean [default: false]
+  notes text
+}
+
+Table visit_finding {
+  id bigint [pk, increment]
+  visit_id bigint [ref: > maintenance_visit.id, not null]
+  severity_id bigint [ref: > lookup_value.id]
+  description text [not null]
+  action_taken text
+  service_request_id bigint [ref: > service_request.id]
+}
+
+// ---------------------------------------------------------------------
+// 11. SERVICE REQUESTS
+// ---------------------------------------------------------------------
+Table service_request {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  request_no varchar(30) [unique, not null, note: 'SR-YYYY-NNNN']
+  building_id bigint [ref: > building.id, not null]
+  unit_id bigint [ref: > unit.id]
+  tenant_id bigint [ref: > tenant.id]
+  meter_id bigint [ref: > meter.id]
+  description text [not null]
+  priority_id bigint [ref: > lookup_value.id, note: 'low | medium | high']
+  status_id bigint [ref: > lookup_value.id, note: 'pending | in_progress | completed']
+  assigned_to bigint [ref: > app_user.id]
+  assigned_vendor_id bigint [ref: > vendor.id]
+  requested_at timestamptz
+  closed_at timestamptz
+  notes text
+}
+
+// ---------------------------------------------------------------------
+// 12. CIVIL DEFENSE COMPLIANCE
+// ---------------------------------------------------------------------
+Table cd_certificate {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  building_id bigint [ref: > building.id, not null]
+  certificate_no varchar(50) [unique]
+  cert_type_id bigint [ref: > lookup_value.id]
+  license_no varchar(50)
+  issued_by varchar(150)
+  issue_date date
+  expiry_date date
+  scope text
+  inspector_name varchar(150)
+  inspection_date date
+  status_id bigint [ref: > lookup_value.id, note: 'valid | expired | renewal_in_progress']
+  notes text
+}
+
+Table cd_renewal {
+  id bigint [pk, increment]
+  certificate_id bigint [ref: > cd_certificate.id, not null]
+  started_at date
+  current_step smallint
+  inspector_name varchar(150)
+  inspector_phone varchar(30)
+  inspector_dept varchar(150)
+  renewal_date date
+  new_expiry_date date
+  new_certificate_id bigint [ref: > cd_certificate.id]
+  status_id bigint [ref: > lookup_value.id]
+  remarks text
+}
+
+// ---------------------------------------------------------------------
+// 13. BILLING & PAYMENTS - TENANTS (AR)
+// ---------------------------------------------------------------------
+Table invoice {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  invoice_no varchar(30) [unique, not null]
+  tenant_id bigint [ref: > tenant.id, not null]
+  building_id bigint [ref: > building.id]
+  contract_id bigint [ref: > supply_contract.id]
+  invoice_type_id bigint [ref: > lookup_value.id, note: 'gas_consumption | maintenance | deposit | connection | other']
+  billing_period_start date
+  billing_period_end date
+  issue_date date [not null]
+  due_date date [not null]
+  subtotal decimal(14,2)
+  vat_amount decimal(14,2) [default: 0]
+  total_amount decimal(14,2)
+  currency_id bigint [ref: > currency.id]
+  exchange_rate decimal(18,6) [default: 1]
+  status_id bigint [ref: > lookup_value.id, note: 'draft | pending | partial | paid | overdue | cancelled']
+  journal_entry_id bigint [ref: > journal_entry.id]
+  notes text
+}
+
+Table invoice_item {
+  id bigint [pk, increment]
+  invoice_id bigint [ref: > invoice.id, not null]
+  item_type_id bigint [ref: > lookup_value.id, note: 'FEE_TYPE']
+  description varchar(300)
+  quantity decimal(14,3)
+  uom varchar(10) [note: 'm3 | month | each']
+  unit_price decimal(14,4)
+  vat_rate decimal(5,2) [default: 5]
+  amount decimal(14,2)
+  meter_reading_id bigint [ref: > meter_reading.id]
+}
+
+Table payment {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  receipt_no varchar(30) [unique, not null]
+  tenant_id bigint [ref: > tenant.id, not null]
+  payment_date date [not null]
+  amount decimal(14,2) [not null]
+  currency_id bigint [ref: > currency.id]
+  payment_method_id bigint [ref: > lookup_value.id, note: 'cash | bank_transfer | cheque | online | card']
+  reference_no varchar(100)
+  received_by bigint [ref: > app_user.id]
+  status_id bigint [ref: > lookup_value.id]
+  journal_entry_id bigint [ref: > journal_entry.id]
+  notes text
+}
+
+Table payment_allocation {
+  id bigint [pk, increment]
+  payment_id bigint [ref: > payment.id, not null]
+  invoice_id bigint [ref: > invoice.id, not null]
+  amount decimal(14,2) [not null]
+}
+
+// ---------------------------------------------------------------------
+// 14. VENDOR BILLS & PAYMENTS (AP)
+// ---------------------------------------------------------------------
+Table vendor_bill {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  vendor_id bigint [ref: > vendor.id, not null]
+  bill_no varchar(50) [not null, note: 'vendor invoice number']
+  bill_date date [not null]
+  due_date date
+  source_type varchar(30) [note: 'amc_contract | refill_request | other']
+  source_id bigint
+  subtotal decimal(14,2)
+  vat_amount decimal(14,2) [default: 0]
+  total_amount decimal(14,2)
+  currency_id bigint [ref: > currency.id]
+  exchange_rate decimal(18,6) [default: 1]
+  status_id bigint [ref: > lookup_value.id]
+  journal_entry_id bigint [ref: > journal_entry.id]
+  notes text
+  indexes { (vendor_id, bill_no) [unique] }
+}
+
+Table vendor_bill_item {
+  id bigint [pk, increment]
+  bill_id bigint [ref: > vendor_bill.id, not null]
+  item_type_id bigint [ref: > lookup_value.id]
+  description varchar(300)
+  quantity decimal(14,3)
+  uom varchar(10)
+  unit_price decimal(14,4)
+  vat_rate decimal(5,2) [default: 5]
+  amount decimal(14,2)
+  expense_account_id bigint [ref: > account.id]
+}
+
+Table vendor_payment {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id, not null]
+  payment_no varchar(30) [unique, not null]
+  vendor_id bigint [ref: > vendor.id, not null]
+  payment_date date [not null]
+  amount decimal(14,2) [not null]
+  currency_id bigint [ref: > currency.id]
+  payment_method_id bigint [ref: > lookup_value.id]
+  reference_no varchar(100)
+  paid_by bigint [ref: > app_user.id]
+  status_id bigint [ref: > lookup_value.id]
+  journal_entry_id bigint [ref: > journal_entry.id]
+  notes text
+}
+
+Table vendor_payment_allocation {
+  id bigint [pk, increment]
+  vendor_payment_id bigint [ref: > vendor_payment.id, not null]
+  vendor_bill_id bigint [ref: > vendor_bill.id, not null]
+  amount decimal(14,2) [not null]
+}
+
+// ---------------------------------------------------------------------
+// 15. ACCOUNTING (GL)
+// ---------------------------------------------------------------------
+Table currency {
+  id bigint [pk, increment]
+  code char(3) [unique, not null, note: 'AED']
+  name_en varchar(50)
+  name_ar varchar(50)
+  symbol varchar(10)
+  decimal_places smallint [default: 2]
+  is_active boolean [default: true]
+}
+
+Table fiscal_period {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  year smallint [not null]
+  period_no smallint [not null]
+  start_date date [not null]
+  end_date date [not null]
+  is_closed boolean [default: false]
+  indexes { (company_id, year, period_no) [unique] }
+}
+
+Table account {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  parent_account_id bigint [ref: > account.id]
+  account_type_id bigint [ref: > lookup_value.id, note: 'asset | liability | equity | revenue | expense']
+  account_code varchar(20) [not null]
+  name_en varchar(200)
+  name_ar varchar(200)
+  level smallint
+  is_group boolean [default: false]
+  is_postable boolean [default: true]
+  currency_id bigint [ref: > currency.id]
+  is_active boolean [default: true]
+  indexes { (company_id, account_code) [unique] }
+}
+
+Table account_mapping {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  branch_id bigint [ref: > branch.id, note: 'null = all branches']
+  source_type varchar(50) [not null, note: 'invoice_item | payment | vendor_bill_item | vendor_payment | deposit | vat']
+  source_key_id bigint [ref: > lookup_value.id, note: 'fee type / payment method / etc.']
+  debit_account_id bigint [ref: > account.id]
+  credit_account_id bigint [ref: > account.id]
+  is_active boolean [default: true]
+}
+
+Table journal_entry {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  branch_id bigint [ref: > branch.id, not null]
+  journal_no varchar(30) [unique, not null]
+  entry_date date [not null]
+  fiscal_period_id bigint [ref: > fiscal_period.id, not null]
+  currency_id bigint [ref: > currency.id]
+  exchange_rate decimal(18,6) [default: 1]
+  description text
+  source_type varchar(50) [note: 'invoice | payment | vendor_bill | vendor_payment | manual']
+  source_id bigint
+  status_id bigint [ref: > lookup_value.id, note: 'draft | posted | reversed']
+  posted_at timestamptz
+  posted_by bigint [ref: > app_user.id]
+  reversed_entry_id bigint [ref: > journal_entry.id]
+  Note: 'Rule: SUM(debit) = SUM(credit) per entry before posting. No posting into closed fiscal_period.'
+}
+
+Table journal_line {
+  id bigint [pk, increment]
+  journal_entry_id bigint [ref: > journal_entry.id, not null]
+  account_id bigint [ref: > account.id, not null]
+  description varchar(300)
+  debit decimal(14,2) [default: 0]
+  credit decimal(14,2) [default: 0]
+  base_debit decimal(14,2) [default: 0, note: 'in company base currency']
+  base_credit decimal(14,2) [default: 0]
+  building_id bigint [ref: > building.id, note: 'analytic dimension']
+  unit_id bigint [ref: > unit.id]
+  tenant_id bigint [ref: > tenant.id]
+  vendor_id bigint [ref: > vendor.id]
+  contract_id bigint [ref: > supply_contract.id]
+}
+
+// ---------------------------------------------------------------------
+// 16. DOCUMENTS, AUDIT & NUMBERING
+// ---------------------------------------------------------------------
+Table document {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id]
+  entity_type varchar(50) [not null, note: 'building | party | tenant | supply_contract | amc_contract | meter_reading | maintenance_visit | cd_certificate | ...']
+  entity_id bigint [not null]
+  document_type_id bigint [ref: > lookup_value.id]
+  file_name varchar(255)
+  file_path varchar(500)
+  mime_type varchar(100)
+  size_bytes bigint
+  expiry_date date
+  indexes { (entity_type, entity_id) }
+}
+
+Table activity_log {
+  id bigint [pk, increment]
+  branch_id bigint [ref: > branch.id]
+  building_id bigint [ref: > building.id]
+  entity_type varchar(50)
+  entity_id bigint
+  action varchar(50) [note: 'create | update | delete | status_change | post']
+  severity_id bigint [ref: > lookup_value.id]
+  description text
+  old_values jsonb
+  new_values jsonb
+  user_id bigint [ref: > app_user.id]
+  occurred_at timestamptz [not null]
+}
+
+Table number_sequence {
+  id bigint [pk, increment]
+  company_id bigint [ref: > company.id, not null]
+  branch_id bigint [ref: > branch.id]
+  prefix varchar(10) [not null, note: 'B | GSC | INV | RCP | RFR | SR | AMC | JE | PO | VP']
+  year smallint
+  last_value int [default: 0]
+  padding smallint [default: 4]
+  indexes { (company_id, branch_id, prefix, year) [unique] }
+}
