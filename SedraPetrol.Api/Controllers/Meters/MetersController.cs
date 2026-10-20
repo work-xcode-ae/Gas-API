@@ -20,7 +20,7 @@ public class MetersController : ApiControllerBase
     /// <summary>Add several meters of the same model to stock: one serial per meter.</summary>
     public record StockBulkInput(long? BranchId, List<string> Serials, string? Type, string? Brand, string? Model, DateOnly? CalibrationDate, decimal? InitialReading, string? Notes);
     public record UnassignInput(DateOnly? ToDate, decimal? FinalReading);
-    public record ReadingInput(decimal ReadingValue, DateTimeOffset? ReadingDate, string? Method, string? Notes, bool AllowReset = false);
+    public record ReadingInput(decimal ReadingValue, DateTimeOffset? ReadingDate, string? Method, string? Notes, bool AllowReset = false, bool IssueInvoice = false);
 
     /// <summary>Meters list. Filters: buildingId, unitId, status, type, unassigned, calibrationDueInDays.</summary>
     [HttpGet]
@@ -213,7 +213,31 @@ public class MetersController : ApiControllerBase
         if (await Lookups.CodeAsync(m.StatusId) is "retired" or "lost")
             throw new BusinessRuleException($"Meter {m.MeterNo} is retired / lost; readings cannot be recorded.");
         var r = await Ops.AddReadingAsync(m, input.ReadingValue, input.ReadingDate ?? DateTimeOffset.UtcNow, input.Method, input.Notes, input.AllowReset);
-        return Ok(new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption });
+        if (!input.IssueInvoice) return Ok(new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption });
+
+        // auto invoice: bill all unbilled consumption of the tenant's contract up to this reading (issued and posted)
+        object? invoice = null; string? invoiceWarning = null;
+        if (r.ContractId == null) invoiceWarning = "No active tenant contract on this meter — the reading was saved without an invoice.";
+        else if ((r.Consumption ?? 0) <= 0) invoiceWarning = "No consumption since the previous reading — nothing to invoice.";
+        else
+        {
+            try
+            {
+                var billing = HttpContext.RequestServices.GetRequiredService<BillingService>();
+                var c = await Db.SupplyContracts.AsNoTracking().FirstAsync(x => x.Id == r.ContractId);
+                var upTo = DateOnly.FromDateTime(r.ReadingDate.ToLocalTime().DateTime);
+                var inv = await billing.GenerateConsumptionInvoiceAsync(c.Id, c.StartDate, upTo, issue: true, includeMonthlyFees: false);
+                if (inv == null) invoiceWarning = "Nothing to invoice.";
+                else
+                {
+                    invoice = new { inv.Id, inv.InvoiceNo, inv.TotalAmount };
+                    Activity.Log("invoice", inv.Id, "create", $"Invoice {inv.InvoiceNo} issued automatically after reading of meter {m.MeterNo}", null, inv.BranchId);
+                    await Db.SaveChangesAsync();
+                }
+            }
+            catch (AppException ex) { invoiceWarning = ex.Message; }   // the reading stays saved; the invoice can be issued later from the contract
+        }
+        return Ok(new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, invoice, invoiceWarning });
     }
 
     // ------------------------------------------------------------------ helpers
