@@ -74,6 +74,9 @@ public class UsersController : ApiControllerBase
         await Db.SaveChangesAsync();
         await SetRolesAndBranches(id, input);
         await tx.CommitAsync();
+        // disabled user / new password → sign out everywhere (role or branch changes reach the user at the next token refresh, ≤ 15 min)
+        if (!input.IsActive) await Sessions.RevokeAllAsync(id, "user_disabled");
+        else if (!string.IsNullOrEmpty(input.Password)) await Sessions.RevokeAllAsync(id, "password_changed");
         return NoContent();
     }
 
@@ -84,6 +87,7 @@ public class UsersController : ApiControllerBase
         ValidatePassword(input.NewPassword);
         u.PasswordHash = new PasswordHasher<AppUser>().HashPassword(u, input.NewPassword);
         await Db.SaveChangesAsync();
+        await Sessions.RevokeAllAsync(id, "password_changed");
         return NoContent();
     }
 
@@ -95,7 +99,22 @@ public class UsersController : ApiControllerBase
         u.IsActive = false;
         Db.AppUsers.Remove(u);
         await Db.SaveChangesAsync();
+        await Sessions.RevokeAllAsync(id, "user_disabled");
         return NoContent();
+    }
+
+    private SedraPetrol.Api.Security.RefreshTokenService Sessions => HttpContext.RequestServices.GetRequiredService<SedraPetrol.Api.Security.RefreshTokenService>();
+
+    /// <summary>Active sessions (devices) of a user.</summary>
+    [HttpGet("{id:long}/sessions")]
+    public async Task<IActionResult> UserSessions(long id) => Ok(await Sessions.SessionsAsync(id));
+
+    /// <summary>Sign the user out of every device (e.g. lost laptop, role change).</summary>
+    [HttpPost("{id:long}/sessions/revoke")]
+    public async Task<IActionResult> RevokeSessions(long id)
+    {
+        if (!await Db.AppUsers.AnyAsync(x => x.Id == id)) throw new NotFoundException("User", id);
+        return Ok(new { revoked = await Sessions.RevokeAllAsync(id, "admin_revoked") });
     }
 
     private async Task SetRolesAndBranches(long userId, UserInput input)

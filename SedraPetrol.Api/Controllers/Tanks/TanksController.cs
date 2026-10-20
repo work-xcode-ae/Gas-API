@@ -16,14 +16,14 @@ public class TanksController : ApiControllerBase
     public record TankInput(long? BuildingId, string? TankNo, long? GasTypeId, string? GasType, decimal CapacityLitres, decimal? CurrentLevelLitres,
         string? SerialNo, string? Manufacturer, DateOnly? InstallDate, DateOnly? LastInspectionDate, DateOnly? NextInspectionDate, string? Status);
 
-    public record LevelInput(decimal LevelLitres, string? EventType, DateTimeOffset? EventDate, string? Notes);
+    public record LevelInput(decimal LevelLitres, string? EventType, DateTimeOffset? EventDate, string? Notes, string? ReadBy = null);
 
     [HttpGet]
     public async Task<IActionResult> List([FromQuery] PageQuery q, [FromQuery] long? buildingId, [FromQuery] long? branchId,
         [FromQuery] string? status, [FromQuery] bool lowOnly = false, CancellationToken ct = default)
     {
         await LoadLookups();
-        var query = Db.Tanks.AsNoTracking().Where(t => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(t.BranchId));
+        var query = Db.Tanks.AsNoTracking().Where(t => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(t.BranchId ?? 0));
         if (buildingId != null) query = query.Where(t => t.BuildingId == buildingId);
         if (branchId != null) query = query.Where(t => t.BranchId == branchId);
         if (!string.IsNullOrEmpty(status)) { var s = await Lookups.IdOrNullAsync(LookupTypes.TankStatus, status); query = query.Where(t => t.StatusId == s); }
@@ -120,7 +120,7 @@ public class TanksController : ApiControllerBase
         var t = await Db.Tanks.FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Tank", id);
         EnsureBranchAccess(t.BranchId);
         if (input.EventType == "refill") throw new AppException("Refills are recorded through the refill workflow.");
-        await RecordLevel(Db, Lookups, t, input.LevelLitres, input.EventType ?? "manual_reading", input.EventDate ?? DateTimeOffset.UtcNow, input.Notes, null);
+        await RecordLevel(Db, Lookups, t, input.LevelLitres, input.EventType ?? "manual_reading", input.EventDate ?? DateTimeOffset.UtcNow, input.Notes, null, input.ReadBy);
         await Db.SaveChangesAsync();
         return Ok(new { t.Id, t.CurrentLevelLitres });
     }
@@ -160,15 +160,21 @@ public class TanksController : ApiControllerBase
     }
 
     /// <summary>Adds a tank_level_history row and updates tank.current_level_litres + status (capacity is enforced here).</summary>
-    internal static async Task RecordLevel(AppDbContext db, LookupService lookups, Tank t, decimal level, string eventType, DateTimeOffset when, string? notes, long? tankRefillId)
+    internal static async Task RecordLevel(AppDbContext db, LookupService lookups, Tank t, decimal level, string eventType, DateTimeOffset when, string? notes,
+        long? tankRefillId, string? readBy = null)
     {
         if (level < 0) throw new AppException("Level cannot be negative.");
         if (level > t.CapacityLitres) throw new BusinessRuleException($"Level {level} L exceeds the tank capacity {t.CapacityLitres} L.");
+        if (when > DateTimeOffset.UtcNow.AddMinutes(5)) throw new AppException("The reading date cannot be in the future.");
+        // a back-dated reading goes into the history but does not replace a newer current level
+        var latest = await db.TankLevelHistories.Where(h => h.TankId == t.Id).MaxAsync(h => (DateTimeOffset?)h.EventDate);
         db.TankLevelHistories.Add(new TankLevelHistory
         {
-            TankId = t.Id, EventDate = when, LevelLitres = level, Notes = notes, TankRefillId = tankRefillId,
+            TankId = t.Id, EventDate = when, LevelLitres = level, Notes = string.IsNullOrWhiteSpace(notes) ? null : notes.Trim(), TankRefillId = tankRefillId,
+            ReadBy = string.IsNullOrWhiteSpace(readBy) ? null : readBy.Trim(),
             EventTypeId = await lookups.ResolveAsync(LookupTypes.TankEventType, null, eventType, field: "eventType"),
         });
+        if (latest != null && when < latest.Value) return;
         t.CurrentLevelLitres = level;
         var code = await lookups.CodeAsync(t.StatusId);
         if (code is null or "ok" or "low")

@@ -40,7 +40,7 @@ public class AlertsQuery
                 $"Gas contract {c.ContractNo} ends {c.EndDate:yyyy-MM-dd}", $"عقد الغاز {c.ContractNo} ينتهي في {c.EndDate:yyyy-MM-dd}"));
 
         var calibLimit = limit.AddYears(-1);
-        foreach (var m in await _db.Meters.AsNoTracking().Where(m => (all || branches.Contains(m.BranchId)) && m.IsActive && m.CalibrationDate != null && m.CalibrationDate <= calibLimit)
+        foreach (var m in await _db.Meters.AsNoTracking().Where(m => (all || branches.Contains(m.BranchId ?? 0)) && m.IsActive && m.CalibrationDate != null && m.CalibrationDate <= calibLimit)
                      .Select(m => new { m.Id, m.MeterNo, m.CalibrationDate }).Take(200).ToListAsync())
         {
             var due = m.CalibrationDate!.Value.AddYears(1);
@@ -48,14 +48,14 @@ public class AlertsQuery
                 $"Meter {m.MeterNo} calibration due {due:yyyy-MM-dd}", $"معايرة العداد {m.MeterNo} مستحقة في {due:yyyy-MM-dd}"));
         }
 
-        foreach (var t in await _db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId)) && t.NextInspectionDate != null && t.NextInspectionDate <= limit)
+        foreach (var t in await _db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId ?? 0)) && t.NextInspectionDate != null && t.NextInspectionDate <= limit)
                      .Select(t => new { t.Id, t.TankNo, t.NextInspectionDate, t.Building!.NameAr, t.Building.NameEn }).ToListAsync())
             list.Add(new Alert("tank_inspection", Sev(t.NextInspectionDate), t.Id, t.TankNo, t.NameAr ?? t.NameEn, t.NextInspectionDate, Left(t.NextInspectionDate),
                 $"Tank {t.TankNo} inspection due {t.NextInspectionDate:yyyy-MM-dd}", $"فحص الخزان {t.TankNo} مستحق في {t.NextInspectionDate:yyyy-MM-dd}"));
 
         var completed = await _lookups.IdOrNullAsync(LookupTypes.RefillStatus, "completed");
         var cancelled = await _lookups.IdOrNullAsync(LookupTypes.RefillStatus, "cancelled");
-        foreach (var t in await _db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId)) && t.CapacityLitres > 0 && (t.CurrentLevelLitres ?? 0) * 100 / t.CapacityLitres < TankRules.LowLevelPercent
+        foreach (var t in await _db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId ?? 0)) && t.CapacityLitres > 0 && (t.CurrentLevelLitres ?? 0) * 100 / t.CapacityLitres < TankRules.LowLevelPercent
                                                                      && !_db.RefillRequests.Any(r => r.TankId == t.Id && r.StatusId != completed && r.StatusId != cancelled))
                      .Select(t => new { t.Id, t.TankNo, t.CapacityLitres, t.CurrentLevelLitres, t.Building!.NameAr, t.Building.NameEn }).ToListAsync())
         {
@@ -64,7 +64,7 @@ public class AlertsQuery
                 $"Tank {t.TankNo} is at {pct}% with no refill request", $"الخزان {t.TankNo} عند {pct}% ولا يوجد طلب تعبئة"));
         }
 
-        foreach (var d in await _db.Drivers.AsNoTracking().Where(d => d.IsActive && d.LicenseExpiry != null && d.LicenseExpiry <= limit).Select(d => new { d.Id, d.NameEn, d.NameAr, d.LicenseExpiry }).ToListAsync())
+        foreach (var d in await _db.Drivers.AsNoTracking().Where(d => d.IsActive && d.LicenseExpiry != null && d.LicenseExpiry <= limit).Select(d => new { d.Id, d.Party!.NameEn, d.Party!.NameAr, d.LicenseExpiry }).ToListAsync())
             list.Add(new Alert("driver_license", Sev(d.LicenseExpiry), d.Id, d.NameAr ?? d.NameEn ?? $"#{d.Id}", null, d.LicenseExpiry, Left(d.LicenseExpiry),
                 $"Driver {d.NameEn} license expires {d.LicenseExpiry:yyyy-MM-dd}", $"رخصة السائق {d.NameAr} تنتهي في {d.LicenseExpiry:yyyy-MM-dd}"));
 

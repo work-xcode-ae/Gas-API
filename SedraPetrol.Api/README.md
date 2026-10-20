@@ -1,8 +1,9 @@
 # Sedra Petrol API
 
 ASP.NET Core 8 Web API for the Sedra Petrol portal (buildings, gas supply, meters, tanks & refill,
-AMC maintenance, Civil Defense, billing and accounting). It is **database-first**: it maps onto the
-`SedraPetrol` SQL Server database created by `../sedra_schema_v2.2_sqlserver.sql` (71 tables). No EF migrations.
+AMC maintenance, Civil Defense, billing and accounting). It is **code-first with EF Core migrations**
+(`Migrations/`); the model follows `../sedra_schema_v2.2_sqlserver.sql` (71 tables, same table/column names,
+foreign keys, unique / filtered indexes and CHECK constraints).
 
 | | |
 |---|---|
@@ -15,7 +16,12 @@ AMC maintenance, Civil Defense, billing and accounting). It is **database-first*
 
 ## 1. Run it
 
-1. **Create the database**: open `sedra_schema_v2.2_sqlserver.sql` in SSMS and run it (F5).
+1. **Database**: nothing to run by hand. On startup the API applies the EF migrations
+   (`Database:MigrateOnStartup`, default `true`) and creates the `SedraPetrol` database if it does not exist.
+   Manual alternative: `dotnet tool restore` then `dotnet ef database update` (from this folder).
+   Schema change: edit the entity → `dotnet ef migrations add <Name>` → restart (or `dotnet ef database update`).
+   Do **not** also run the SQL script against the same database — the migrations would then fail with
+   "There is already an object named ...". Drop that database first (or use a new database name).
 2. **Connection string**: edit `appsettings.json` → `ConnectionStrings:SedraPetrol`
    (default: `Server=localhost;Database=SedraPetrol;Trusted_Connection=True;TrustServerCertificate=True`).
 3. **JWT key**: change `Jwt:Key` (any random string of 32+ characters). In production set it with the

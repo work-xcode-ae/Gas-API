@@ -18,7 +18,7 @@ public class VendorsController : CrudController<Vendor>
     {
         var typeId = await Lookups.IdOrNullAsync(LookupTypes.VendorType, type);
         var rows = await Db.Vendors.AsNoTracking().Where(v => v.IsActive && (type == null || v.VendorTypeId == typeId))
-            .OrderBy(v => v.NameAr).Select(v => new { v.Id, v.Code, v.NameEn, v.NameAr, v.Phone, v.Email }).ToListAsync();
+            .OrderBy(v => v.Party!.NameAr).Select(v => new { v.Id, Code = v.Party!.PartyCode, v.Party!.NameEn, v.Party!.NameAr, v.Party!.Phone, v.Party!.Email }).ToListAsync();
         return Ok(rows.Select(v => new { v.Id, v.Code, name = Loc(v.NameEn, v.NameAr), v.Phone, v.Email }));
     }
 
@@ -48,7 +48,6 @@ public class VendorsController : CrudController<Vendor>
     protected override async Task OnCreatingAsync(Vendor e)
     {
         await Lookups.ResolveAsync(LookupTypes.VendorType, e.VendorTypeId, null, true, "vendorTypeId");
-        if (string.IsNullOrWhiteSpace(e.Code)) e.Code = await Numbers.NextAsync(NumberPrefixes.Vendor, yearly: false);
     }
 }
 

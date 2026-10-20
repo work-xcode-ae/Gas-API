@@ -28,6 +28,11 @@ public partial class TankLevelHistory : AuditableEntity
     [Column("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>Who took the reading on site (technician / driver / guard …). The user who entered it is created_by.</summary>
+    [Column("read_by")]
+    [MaxLength(100)]
+    public string? ReadBy { get; set; }
+
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(TankId)), JsonIgnore]
     public Tank? Tank { get; set; }

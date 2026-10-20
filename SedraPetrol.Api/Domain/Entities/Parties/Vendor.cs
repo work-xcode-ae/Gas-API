@@ -1,56 +1,52 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using System.Text.Json.Serialization;
-using Microsoft.EntityFrameworkCore;
 
 namespace SedraPetrol.Api.Domain.Entities;
 
-/// <summary>Table <c>vendor</c> (auto-generated from sedra_schema_v2.2_sqlserver.sql).</summary>
-[Table("vendor")]
-public partial class Vendor : AuditableEntity
+/// <summary>
+/// Supplier role of a party — table <c>party_vendor</c> (<c>party_id</c> = <c>party.id</c>).
+/// Name, code, TRN, contacts and the ledger account are on <see cref="PartyRole.Party"/>.
+/// </summary>
+[Table("party_vendor")]
+public partial class Vendor : PartyRole
 {
     [Column("branch_id")]
     public long? BranchId { get; set; }
 
+    /// <summary>Lookup VENDOR_TYPE.</summary>
     [Column("vendor_type_id")]
     public long VendorTypeId { get; set; }
 
-    [Column("code")]
-    [MaxLength(30)]
-    public string? Code { get; set; }
-
-    [Column("name_en")]
-    [MaxLength(200)]
-    public string? NameEn { get; set; }
-
-    [Column("name_ar")]
-    [MaxLength(200)]
-    public string? NameAr { get; set; }
-
-    [Column("trade_license_no")]
-    [MaxLength(50)]
-    public string? TradeLicenseNo { get; set; }
-
-    [Column("trn")]
-    [MaxLength(20)]
-    public string? Trn { get; set; }
-
-    [Column("phone")]
-    [MaxLength(30)]
-    public string? Phone { get; set; }
-
-    [Column("email")]
-    [MaxLength(150)]
-    public string? Email { get; set; }
-
-    [Column("address")]
-    public string? Address { get; set; }
-
-    [Column("payable_account_id")]
-    public long? PayableAccountId { get; set; }
-
     [Column("is_active")]
     public bool IsActive { get; set; } = true;
+
+    // ---- person / company fields, stored on party (flat in the API) ----
+    [NotMapped, PartyField(nameof(Entities.Party.NameEn)), MaxLength(200)]
+    public string? NameEn { get => Party?.NameEn; set => P.NameEn = value; }
+
+    [NotMapped, PartyField(nameof(Entities.Party.NameAr)), MaxLength(200)]
+    public string? NameAr { get => Party?.NameAr; set => P.NameAr = value; }
+
+    [NotMapped, PartyField(nameof(Entities.Party.Phone)), MaxLength(30)]
+    public string? Phone { get => Party?.Phone; set => P.Phone = value; }
+
+    [NotMapped, PartyField(nameof(Entities.Party.Email)), MaxLength(150)]
+    public string? Email { get => Party?.Email; set => P.Email = value; }
+
+    [NotMapped, PartyField(nameof(Entities.Party.Address))]
+    public string? Address { get => Party?.Address; set => P.Address = value; }
+
+    /// <summary>Supplier code (= party code).</summary>
+    [NotMapped, PartyField(nameof(Entities.Party.PartyCode)), MaxLength(20)]
+    public string? Code { get => Party?.PartyCode; set { if (!string.IsNullOrWhiteSpace(value)) P.PartyCode = value.Trim(); } }
+
+    [NotMapped, PartyField(nameof(Entities.Party.TradeLicenseNo)), MaxLength(50)]
+    public string? TradeLicenseNo { get => Party?.TradeLicenseNo; set => P.TradeLicenseNo = value; }
+
+    /// <summary>Tax registration number (= party.tax_number).</summary>
+    [NotMapped, PartyField(nameof(Entities.Party.TaxNumber)), MaxLength(30)]
+    public string? Trn { get => Party?.TaxNumber; set => P.TaxNumber = value; }
 
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(BranchId)), JsonIgnore]
@@ -58,7 +54,4 @@ public partial class Vendor : AuditableEntity
 
     [ForeignKey(nameof(VendorTypeId)), JsonIgnore]
     public LookupValue? VendorType { get; set; }
-
-    [ForeignKey(nameof(PayableAccountId)), JsonIgnore]
-    public Account? PayableAccount { get; set; }
 }

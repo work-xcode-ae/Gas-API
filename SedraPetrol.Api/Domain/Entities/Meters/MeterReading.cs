@@ -35,6 +35,18 @@ public partial class MeterReading : AuditableEntity
     [Column("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>READING_TYPE: opening | periodic | closing | replacement_out | replacement_in | removal.</summary>
+    [Column("reading_type_id")]
+    public long? ReadingTypeId { get; set; }
+
+    /// <summary>Unit the meter was installed in when the reading was taken.</summary>
+    [Column("unit_id")]
+    public long? UnitId { get; set; }
+
+    /// <summary>Tenancy (supply contract) the reading belongs to; null while the unit is vacant.</summary>
+    [Column("contract_id")]
+    public long? ContractId { get; set; }
+
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(MeterId)), JsonIgnore]
     public Meter? Meter { get; set; }
@@ -47,4 +59,13 @@ public partial class MeterReading : AuditableEntity
 
     [ForeignKey(nameof(InvoiceId)), JsonIgnore]
     public Invoice? Invoice { get; set; }
+
+    [ForeignKey(nameof(ReadingTypeId)), JsonIgnore]
+    public LookupValue? ReadingType { get; set; }
+
+    [ForeignKey(nameof(UnitId)), JsonIgnore]
+    public Unit? Unit { get; set; }
+
+    [ForeignKey(nameof(ContractId)), JsonIgnore]
+    public SupplyContract? Contract { get; set; }
 }

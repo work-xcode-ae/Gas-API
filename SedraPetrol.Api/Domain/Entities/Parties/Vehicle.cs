@@ -5,10 +5,12 @@ using Microsoft.EntityFrameworkCore;
 
 namespace SedraPetrol.Api.Domain.Entities;
 
-/// <summary>Table <c>vehicle</c> (auto-generated from sedra_schema_v2.2_sqlserver.sql).</summary>
-[Table("vehicle")]
-public partial class Vehicle : AuditableEntity
+/// <summary>Vehicle / tanker — an asset; vehicle fields in table <c>asset_vehicle</c> (<c>asset_id</c> = <c>asset.id</c>). <c>vendor_id</c> set = hired from a supplier.</summary>
+[Table("asset_vehicle")]
+public partial class Vehicle : Asset
 {
+    public Vehicle() { AssetType = AssetTypes.Vehicle; }
+
     [Column("vendor_id")]
     public long? VendorId { get; set; }
 
@@ -27,8 +29,6 @@ public partial class Vehicle : AuditableEntity
     [Column("registration_expiry")]
     public DateOnly? RegistrationExpiry { get; set; }
 
-    [Column("is_active")]
-    public bool IsActive { get; set; } = true;
 
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(VendorId)), JsonIgnore]

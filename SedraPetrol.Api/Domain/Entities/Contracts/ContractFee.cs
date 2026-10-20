@@ -39,7 +39,7 @@ public partial class ContractFee : AuditableEntity
 
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(ContractId)), JsonIgnore]
-    public SupplyContract? Contract { get; set; }
+    public Contract? Contract { get; set; }
 
     [ForeignKey(nameof(FeeTypeId)), JsonIgnore]
     public LookupValue? FeeType { get; set; }

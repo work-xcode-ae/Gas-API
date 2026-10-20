@@ -82,6 +82,17 @@ public class DailyJobsService : BackgroundService
             t.StatusId = pct < TankRules.LowLevelPercent ? low : ok;
         }
         await db.SaveChangesAsync(ct);
+
+        // 6. Owner billing: AMC instalments that reached their due date are invoiced and posted automatically
+        try
+        {
+            var n = await sp.GetRequiredService<OwnerBillingService>().IssueDueAmcAsync(null, sp.GetRequiredService<ILogger<DailyJobsService>>());
+            if (n > 0) sp.GetRequiredService<ILogger<DailyJobsService>>().LogInformation("Daily jobs: {Count} AMC instalment invoices issued.", n);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            sp.GetRequiredService<ILogger<DailyJobsService>>().LogWarning(ex, "AMC auto-invoicing failed (will retry).");
+        }
     }
 }
 

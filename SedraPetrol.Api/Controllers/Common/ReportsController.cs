@@ -5,7 +5,7 @@ using SedraPetrol.Api.Services;
 
 namespace SedraPetrol.Api.Controllers;
 
-/// <summary>Reports page: consumption, collections, A/R aging, occupancy, refills, vendor balances and VAT.</summary>
+/// <summary>Reports page: consumption, collections, A/R aging, occupancy, meters, refills, vendor balances and VAT.</summary>
 [Route("api/reports")]
 [PermissionModule("reports")]
 public class ReportsController : ApiControllerBase
@@ -23,7 +23,7 @@ public class ReportsController : ApiControllerBase
         var rows = from r in Db.MeterReadings.AsNoTracking()
                    join a in Db.MeterAssignments on r.MeterId equals a.MeterId
                    where r.ReadingDate >= fd && r.ReadingDate <= td && a.ToDate == null
-                         && (buildingId == null || a.Unit!.BuildingId == buildingId) && (all || br.Contains(r.Meter!.BranchId))
+                         && (buildingId == null || a.Unit!.BuildingId == buildingId) && (all || br.Contains(r.Meter!.BranchId ?? 0))
                    select new { r.ReadingDate, Consumption = r.Consumption ?? 0, a.UnitId, a.Unit!.UnitNo, a.Unit.BuildingId, a.Unit.Building!.Code, a.Unit.Building.NameEn, a.Unit.Building.NameAr };
         switch (groupBy)
         {
@@ -76,7 +76,7 @@ public class ReportsController : ApiControllerBase
         var open = await billing.InvoiceStatusIdsAsync("pending", "partial", "overdue");
         var br = Branches(branchId); var all = br.Count == 0;
         var inv = await Db.Invoices.AsNoTracking().Where(i => i.StatusId != null && open.Contains(i.StatusId.Value) && (buildingId == null || i.BuildingId == buildingId) && (all || br.Contains(i.BranchId)))
-            .Select(i => new { i.Id, i.TenantId, i.Tenant!.NameEn, i.Tenant.NameAr, i.Tenant.Phone, i.DueDate, Total = i.TotalAmount ?? 0 }).ToListAsync();
+            .Select(i => new { i.Id, i.TenantId, i.Tenant!.Party!.NameEn, i.Tenant.Party!.NameAr, i.Tenant.Party!.Phone, i.DueDate, Total = i.TotalAmount ?? 0 }).ToListAsync();
         var paid = await billing.PaidByInvoiceAsync(inv.Select(i => i.Id));
         var rows = inv.Select(i => new { i, bal = i.Total - paid.GetValueOrDefault(i.Id), days = Today.DayNumber - i.DueDate.DayNumber }).Where(x => x.bal > 0)
             .GroupBy(x => x.i.TenantId).Select(g => new
@@ -108,6 +108,70 @@ public class ReportsController : ApiControllerBase
                                          rate = r.Units == 0 ? 0 : Math.Round(r.Occupied * 100m / r.Units, 1) }));
     }
 
+    /// <summary>
+    /// Meters by status and calibration validity: totals per status, per building (incl. meters in stock) and the meter list.
+    /// Calibration is valid for Meters:CalibrationValidMonths (default 12) months; due_soon = expires within 30 days.
+    /// </summary>
+    [HttpGet("meters")]
+    public async Task<IActionResult> Meters([FromQuery] long? branchId, [FromQuery] long? buildingId, [FromQuery] string? status, [FromQuery] string? calibration)
+    {
+        await LoadLookups();
+        var months = HttpContext.RequestServices.GetRequiredService<IConfiguration>().GetValue<int?>("Meters:CalibrationValidMonths") ?? 12;
+        var br = Branches(branchId); var all = br.Count == 0;
+        var q = from m in Db.Meters.AsNoTracking()
+                where all || br.Contains(m.BranchId ?? 0)
+                let a = Db.MeterAssignments.Where(x => x.MeterId == m.Id && x.ToDate == null).FirstOrDefault()
+                select new
+                {
+                    m.Id, m.MeterNo, m.SerialNo, m.StatusId, m.MeterTypeId, m.CalibrationDate, m.InstallDate, m.Brand,
+                    UnitId = a == null ? (long?)null : a.UnitId, UnitNo = a == null ? null : a.Unit!.UnitNo,
+                    BuildingId = a == null ? (long?)null : a.Unit!.BuildingId, BCode = a == null ? null : a.Unit!.Building!.Code,
+                    BEn = a == null ? null : a.Unit!.Building!.NameEn, BAr = a == null ? null : a.Unit!.Building!.NameAr,
+                    LastRead = Db.MeterReadings.Where(r => r.MeterId == m.Id).Max(r => (DateTimeOffset?)r.ReadingDate),
+                };
+        if (buildingId != null) q = q.Where(x => x.BuildingId == buildingId);
+        var list = await q.OrderBy(x => x.BCode).ThenBy(x => x.UnitNo).ThenBy(x => x.MeterNo).ToListAsync();
+
+        string CalState(DateOnly? d)
+        {
+            if (d == null) return "unknown";
+            var exp = d.Value.AddMonths(months).AddDays(-1);
+            return exp < Today ? "expired" : exp <= Today.AddDays(30) ? "due_soon" : "valid";
+        }
+        var rows = list.Select(x => new
+        {
+            x.Id, meterNo = x.MeterNo, serial = x.SerialNo, type = Code(x.MeterTypeId), typeLabel = Label(x.MeterTypeId),
+            status = Code(x.StatusId) ?? "unknown", statusLabel = Label(x.StatusId) ?? "—", x.Brand,
+            x.BuildingId, buildingCode = x.BCode, building = x.BuildingId == null ? null : Loc(x.BEn, x.BAr), unitId = x.UnitId, unit = x.UnitNo,
+            installed = x.UnitId != null, x.InstallDate, calibrationDate = x.CalibrationDate,
+            calibrationExpiry = x.CalibrationDate?.AddMonths(months).AddDays(-1), calibrationState = CalState(x.CalibrationDate), lastRead = x.LastRead,
+        }).ToList();
+        if (!string.IsNullOrWhiteSpace(status)) rows = rows.Where(r => r.status == status).ToList();
+        if (!string.IsNullOrWhiteSpace(calibration)) rows = rows.Where(r => r.calibrationState == calibration).ToList();
+
+        var statuses = (await Lookups.ByTypeAsync(LookupTypes.MeterStatus)).Where(v => v.IsActive).Select(v => new { v.Code, label = Loc(v.NameEn, v.NameAr) }).ToList();
+        var byStatus = statuses.Select(s => new { status = s.Code, s.label, count = rows.Count(r => r.status == s.Code) })
+            .Concat(rows.Where(r => !statuses.Any(s => s.Code == r.status)).GroupBy(r => r.status).Select(g => new { status = g.Key, label = g.First().statusLabel, count = g.Count() }))
+            .ToList();
+        var byBuilding = rows.GroupBy(r => new { r.BuildingId, r.buildingCode, r.building })
+            .Select(g => new
+            {
+                g.Key.BuildingId, code = g.Key.buildingCode ?? "—", building = g.Key.building ?? (IsEnglish ? "In stock (not installed)" : "في المخزون (غير مركّب)"),
+                total = g.Count(), counts = g.GroupBy(r => r.status).ToDictionary(x => x.Key, x => x.Count()),
+                calibrationExpired = g.Count(r => r.calibrationState == "expired"), calibrationDueSoon = g.Count(r => r.calibrationState == "due_soon"),
+            }).OrderBy(b => b.BuildingId == null ? 1 : 0).ThenBy(b => b.code).ToList();
+        return Ok(new
+        {
+            calibrationValidMonths = months, statuses = byStatus, byBuilding, rows,
+            totals = new
+            {
+                total = rows.Count, installed = rows.Count(r => r.installed), inStock = rows.Count(r => !r.installed),
+                calibrationValid = rows.Count(r => r.calibrationState == "valid"), calibrationDueSoon = rows.Count(r => r.calibrationState == "due_soon"),
+                calibrationExpired = rows.Count(r => r.calibrationState == "expired"), calibrationUnknown = rows.Count(r => r.calibrationState == "unknown"),
+            },
+        });
+    }
+
     /// <summary>Refills delivered per building with purchase cost.</summary>
     [HttpGet("refills")]
     public async Task<IActionResult> Refills([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, [FromQuery] long? branchId)
@@ -115,12 +179,17 @@ public class ReportsController : ApiControllerBase
         var (f, t) = Range(from, to);
         var fd = new DateTimeOffset(f.ToDateTime(TimeOnly.MinValue)); var td = new DateTimeOffset(t.ToDateTime(TimeOnly.MaxValue));
         var br = Branches(branchId); var all = br.Count == 0;
-        var rows = await (from tr in Db.TankRefills.AsNoTracking()
-                          where tr.RefillDatetime >= fd && tr.RefillDatetime <= td && (all || br.Contains(tr.Tank!.BranchId))
-                          let cost = Db.RefillPurchaseInvoices.Where(p => p.RefillRequestId == tr.RefillRequestId).Select(p => p.VendorBill!.TotalAmount).FirstOrDefault()
-                          group new { tr, cost } by new { tr.Tank!.BuildingId, tr.Tank.Building!.Code, tr.Tank.Building.NameEn, tr.Tank.Building.NameAr } into g
-                          select new { g.Key.BuildingId, g.Key.Code, g.Key.NameEn, g.Key.NameAr, Refills = g.Count(), Litres = g.Sum(x => x.tr.DeliveredQtyLitres ?? 0), Cost = g.Sum(x => x.cost ?? 0) })
-                         .OrderByDescending(x => x.Litres).ToListAsync();
+        // SQL Server cannot SUM a sub-query: load the refills with their bill amount, then group in memory
+        var refills = await (from tr in Db.TankRefills.AsNoTracking()
+                             where tr.RefillDatetime >= fd && tr.RefillDatetime <= td && (all || br.Contains(tr.Tank!.BranchId ?? 0))
+                             select new
+                             {
+                                 tr.Tank!.BuildingId, tr.Tank.Building!.Code, tr.Tank.Building.NameEn, tr.Tank.Building.NameAr, Litres = tr.DeliveredQtyLitres ?? 0,
+                                 Cost = Db.RefillPurchaseInvoices.Where(p => p.RefillRequestId == tr.RefillRequestId).Select(p => p.VendorBill!.TotalAmount).FirstOrDefault(),
+                             }).ToListAsync();
+        var rows = refills.GroupBy(x => new { x.BuildingId, x.Code, x.NameEn, x.NameAr })
+            .Select(g => new { g.Key.BuildingId, g.Key.Code, g.Key.NameEn, g.Key.NameAr, Refills = g.Count(), Litres = g.Sum(x => x.Litres), Cost = g.Sum(x => x.Cost ?? 0) })
+            .OrderByDescending(x => x.Litres).ToList();
         return Ok(new { from = f, to = t, rows = rows.Select(r => new { r.BuildingId, r.Code, building = Loc(r.NameEn, r.NameAr), r.Refills, r.Litres, r.Cost }),
                         totals = new { refills = rows.Sum(r => r.Refills), litres = rows.Sum(r => r.Litres), cost = rows.Sum(r => r.Cost) } });
     }
@@ -136,7 +205,7 @@ public class ReportsController : ApiControllerBase
         var vendors = await Db.Vendors.AsNoTracking().ToDictionaryAsync(v => v.Id);
         return Ok(bills.GroupBy(b => b.VendorId).Select(g => new
         {
-            vendorId = g.Key, vendor = Loc(vendors.GetValueOrDefault(g.Key)?.NameEn, vendors.GetValueOrDefault(g.Key)?.NameAr),
+            vendorId = g.Key, vendor = Loc(vendors.GetValueOrDefault(g.Key)?.Party!.NameEn, vendors.GetValueOrDefault(g.Key)?.Party!.NameAr),
             billed = g.Sum(b => b.Total), paid = g.Sum(b => paid.GetValueOrDefault(b.Id)), outstanding = g.Sum(b => b.Total - paid.GetValueOrDefault(b.Id)),
         }).OrderByDescending(x => x.outstanding));
     }

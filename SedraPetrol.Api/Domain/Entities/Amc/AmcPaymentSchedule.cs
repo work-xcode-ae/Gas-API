@@ -29,6 +29,10 @@ public partial class AmcPaymentSchedule : AuditableEntity
     [Column("vendor_bill_id")]
     public long? VendorBillId { get; set; }
 
+    /// <summary>Invoice sent to the client (building owner) for this instalment — issued on / after the instalment date.</summary>
+    [Column("invoice_id")]
+    public long? InvoiceId { get; set; }
+
     [Column("notes")]
     public string? Notes { get; set; }
 
@@ -38,6 +42,9 @@ public partial class AmcPaymentSchedule : AuditableEntity
 
     [ForeignKey(nameof(StatusId)), JsonIgnore]
     public LookupValue? Status { get; set; }
+
+    [ForeignKey(nameof(InvoiceId)), JsonIgnore]
+    public Invoice? Invoice { get; set; }
 
     [ForeignKey(nameof(VendorBillId)), JsonIgnore]
     public VendorBill? VendorBill { get; set; }

@@ -12,7 +12,9 @@ public static class NumberPrefixes
 {
     public const string Building = "B", Tenant = "T", SupplyContract = "GSC", Invoice = "INV", Receipt = "RCP",
         Refill = "RFR", ServiceRequest = "SR", Amc = "AMC", Journal = "JE", PurchaseOrder = "PO",
-        VendorPayment = "VP", MeterService = "MS", Visit = "MV", Meter = "M", Vendor = "V";
+        VendorPayment = "VP", MeterService = "MS", Visit = "MV", Meter = "M", Vendor = "V",
+        ReceiptVoucher = "RV", PaymentVoucher = "PV",
+        CreditNote = "CN", CustomerRefund = "RF", Party = "P";
 }
 
 /// <summary>

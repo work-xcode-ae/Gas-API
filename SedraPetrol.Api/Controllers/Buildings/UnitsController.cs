@@ -20,7 +20,10 @@ public class UnitsController : ApiControllerBase
 
     public record UnitDto(long Id, string Key, long BuildingId, string? BuildingCode, string? BuildingName, string No, int? Floor,
         string? Type, string? TypeLabel, decimal? Area, short? Bedrooms, short? Bathrooms, decimal? Rent, string? Status, string? StatusLabel,
-        long? TenantId, string? Tenant, long? ContractId, string? ContractNo, long? MeterId, string? Meter, DateOnly? LastInspectionDate, string? Notes);
+        long? TenantId, string? Tenant, long? ContractId, string? ContractNo, long? MeterId, string? Meter, DateOnly? LastInspectionDate, string? Notes,
+        bool IsActive = true, string? MeterStatus = null, string? MeterStatusLabel = null);
+
+    public record ActiveInput(bool IsActive, string? Reason);
 
     /// <summary>
     /// Units list. Filters: buildingId, status (vacant|occupied|reserved|maintenance), type, floor, vacantOnly, withoutMeter.
@@ -44,7 +47,7 @@ public class UnitsController : ApiControllerBase
         {
             var s = q.Search.Trim();
             query = query.Where(u => u.UnitNo.Contains(s) || Db.SupplyContracts.Any(c => c.UnitId == u.Id && c.IsActive &&
-                                     ((c.Tenant!.NameAr != null && c.Tenant.NameAr.Contains(s)) || (c.Tenant.NameEn != null && c.Tenant.NameEn.Contains(s)))));
+                                     ((c.Tenant!.Party!.NameAr != null && c.Tenant.Party!.NameAr.Contains(s)) || (c.Tenant.Party!.NameEn != null && c.Tenant.Party!.NameEn.Contains(s)))));
         }
         query = q.Sort?.ToLowerInvariant() switch
         {
@@ -63,6 +66,73 @@ public class UnitsController : ApiControllerBase
         await LoadLookups();
         var row = await Project(Db.Units.AsNoTracking().Where(u => u.Id == id)).FirstOrDefaultAsync(ct) ?? throw new NotFoundException("Unit", id);
         return Ok(Map(row));
+    }
+
+    /// <summary>
+    /// Meter history of a unit: every meter installed in it (current first, then past), with the readings taken while it was
+    /// installed here — opening / closing reading, consumption and why it left (removed / replaced).
+    /// </summary>
+    [HttpGet("{id:long}/meters")]
+    public async Task<IActionResult> MeterHistory(long id, CancellationToken ct)
+    {
+        await LoadLookups();
+        var unit = await Db.Units.AsNoTracking().Where(u => u.Id == id).Select(u => new { u.Id, u.Building!.BranchId }).FirstOrDefaultAsync(ct)
+                   ?? throw new NotFoundException("Unit", id);
+        EnsureBranchAccess(unit.BranchId);
+
+        var assignments = await Db.MeterAssignments.AsNoTracking().Where(a => a.UnitId == id)
+            .OrderByDescending(a => a.ToDate == null).ThenByDescending(a => a.FromDate).ThenByDescending(a => a.Id)
+            .Select(a => new
+            {
+                a.Id, a.MeterId, a.FromDate, a.ToDate, a.Meter!.MeterNo, a.Meter.SerialNo, a.Meter.MeterTypeId, a.Meter.Brand, a.Meter.Model,
+                a.Meter.CalibrationDate, a.Meter.InitialReading, a.Meter.LocationNote, a.Meter.StatusId,
+            }).ToListAsync(ct);
+
+        var meterIds = assignments.Select(a => a.MeterId).Distinct().ToList();
+        var allReadings = await Db.MeterReadings.AsNoTracking().Where(r => meterIds.Contains(r.MeterId))
+            .OrderBy(r => r.ReadingDate).ThenBy(r => r.Id)
+            .Select(r => new
+            {
+                r.Id, r.MeterId, r.UnitId, r.ReadingDate, r.ReadingValue, r.Consumption, r.ReadingTypeId, r.MethodId, billed = r.InvoiceId != null, r.Notes,
+                ReadBy = r.ReadByUser!.NameAr ?? r.ReadByUser.NameEn,
+            }).ToListAsync(ct);
+
+        var today = Today;
+        var rows = assignments.Select(a =>
+        {
+            // readings of this meter during this installation (tagged with this unit, or untagged and inside the dates)
+            var from = new DateTimeOffset(a.FromDate.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero).AddHours(-14);
+            var to = a.ToDate == null ? DateTimeOffset.MaxValue : new DateTimeOffset(a.ToDate.Value.ToDateTime(TimeOnly.MaxValue), TimeSpan.Zero).AddHours(14);
+            var readings = allReadings.Where(r => r.MeterId == a.MeterId && (r.UnitId == id || (r.UnitId == null && r.ReadingDate >= from && r.ReadingDate <= to))).ToList();
+            var first = readings.FirstOrDefault();
+            var last = readings.LastOrDefault();
+            var endType = a.ToDate == null ? null : Code(last?.ReadingTypeId);
+            return new
+            {
+                assignmentId = a.Id, a.MeterId, meterNo = a.MeterNo, serial = a.SerialNo, type = Code(a.MeterTypeId), typeLabel = Label(a.MeterTypeId),
+                a.Brand, a.Model, a.CalibrationDate, a.InitialReading, location = a.LocationNote, status = Code(a.StatusId), statusLabel = Label(a.StatusId),
+                a.FromDate, a.ToDate, isCurrent = a.ToDate == null,
+                days = (a.ToDate ?? today).DayNumber - a.FromDate.DayNumber,
+                openingReading = first?.ReadingValue ?? a.InitialReading,
+                closingReading = a.ToDate == null ? null : last?.ReadingValue,
+                lastReading = last?.ReadingValue, lastReadingDate = last?.ReadingDate,
+                consumption = readings.Count > 1 ? readings.Skip(1).Sum(r => r.Consumption ?? 0) : 0,
+                readingsCount = readings.Count,
+                endReason = a.ToDate == null ? null : endType is "replacement_out" ? "replaced" : endType == "removal" ? "removed" : "ended",
+                readings = readings.OrderByDescending(r => r.ReadingDate).Take(200).Select(r => new
+                {
+                    r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, type = Code(r.ReadingTypeId), typeLabel = Label(r.ReadingTypeId),
+                    method = Code(r.MethodId), r.billed, readBy = r.ReadBy, r.Notes,
+                }),
+            };
+        }).ToList();
+
+        return Ok(new
+        {
+            current = rows.FirstOrDefault(r => r.isCurrent),
+            history = rows,
+            totals = new { meters = rows.Select(r => r.MeterId).Distinct().Count(), installations = rows.Count, consumption = rows.Sum(r => r.consumption) },
+        });
     }
 
     [HttpPost]
@@ -115,13 +185,32 @@ public class UnitsController : ApiControllerBase
         return NoContent();
     }
 
+    /// <summary>Deactivate / re-activate a unit (kept with all its history; no new tenant contract while inactive).</summary>
+    [HttpPatch("{id:long}/active")]
+    public async Task<IActionResult> SetActive(long id, [FromBody] ActiveInput input)
+    {
+        var u = await Db.Units.Include(x => x.Building).FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Unit", id);
+        EnsureBranchAccess(u.Building?.BranchId);
+        if (!input.IsActive && await Db.SupplyContracts.AnyAsync(c => c.UnitId == id && c.IsActive))
+            throw new BusinessRuleException("The unit has an active supply contract. End the contract before deactivating the unit.");
+        u.IsActive = input.IsActive;
+        if (!string.IsNullOrWhiteSpace(input.Reason))
+            u.Notes = $"{u.Notes}\n[{(input.IsActive ? "Activated" : "Deactivated")} {DateTime.Today:yyyy-MM-dd}] {input.Reason.Trim()}".Trim();
+        Activity.Log("unit", u.Id, "status_change", $"Unit {u.UnitNo} {(input.IsActive ? "activated" : "deactivated")}", u.BuildingId, u.Building?.BranchId);
+        await Db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>Soft delete (is_deleted = 1): hidden everywhere but kept in the database with its history.</summary>
     [HttpDelete("{id:long}")]
     public async Task<IActionResult> Delete(long id)
     {
-        var u = await Db.Units.FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Unit", id);
+        var u = await Db.Units.Include(x => x.Building).FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Unit", id);
+        EnsureBranchAccess(u.Building?.BranchId);
         if (await Db.SupplyContracts.AnyAsync(c => c.UnitId == id && c.IsActive)) throw new BusinessRuleException("The unit has an active supply contract.");
         if (await Db.MeterAssignments.AnyAsync(a => a.UnitId == id && a.ToDate == null)) throw new BusinessRuleException("A meter is still assigned to this unit. Unassign it first.");
         Db.Units.Remove(u);
+        Activity.Log("unit", u.Id, "delete", $"Unit {u.UnitNo} deleted", u.BuildingId, u.Building?.BranchId);
         await Db.SaveChangesAsync();
         return NoContent();
     }
@@ -137,7 +226,7 @@ public class UnitsController : ApiControllerBase
         var unit = new Unit
         {
             BuildingId = buildingId, UnitNo = no, FloorNo = i.Floor,
-            UnitTypeId = await lookups.ResolveAsync(LookupTypes.UnitType, i.UnitTypeId, i.Type ?? "apartment", field: "type"),
+            UnitTypeId = await lookups.ResolveAsync(LookupTypes.UnitType, i.UnitTypeId, i.Type ?? "residential", field: "type"),
             StatusId = await lookups.ResolveAsync(LookupTypes.UnitStatus, i.StatusId, i.Status ?? "vacant", field: "status"),
             AreaSqm = i.Area, Bedrooms = i.Bedrooms, Bathrooms = i.Bathrooms, RentAmount = i.Rent, LastInspectionDate = i.LastInspectionDate,
             Notes = i.Notes, IsActive = true,
@@ -147,15 +236,15 @@ public class UnitsController : ApiControllerBase
     }
 
     private record Row(Unit U, string? BCode, string? BNameEn, string? BNameAr, long? ContractId, string? ContractNo, long? TenantId,
-        string? TenantEn, string? TenantAr, long? MeterId, string? MeterNo);
+        string? TenantEn, string? TenantAr, long? MeterId, string? MeterNo, long? MeterStatusId);
 
     private IQueryable<Row> Project(IQueryable<Unit> q) =>
         from u in q
         let c = Db.SupplyContracts.Where(c => c.UnitId == u.Id && c.IsActive).OrderByDescending(c => c.StartDate).FirstOrDefault()
         let m = Db.MeterAssignments.Where(a => a.UnitId == u.Id && a.ToDate == null).Select(a => a.Meter).FirstOrDefault()
         select new Row(u, u.Building!.Code, u.Building.NameEn, u.Building.NameAr, c == null ? null : c.Id, c == null ? null : c.ContractNo,
-            c == null ? null : c.TenantId, c == null ? null : c.Tenant!.NameEn, c == null ? null : c.Tenant!.NameAr,
-            m == null ? null : m.Id, m == null ? null : m.MeterNo);
+            c == null ? null : c.TenantId, c == null ? null : c.Tenant!.Party!.NameEn, c == null ? null : c.Tenant!.Party!.NameAr,
+            m == null ? null : m.Id, m == null ? null : m.MeterNo, m == null ? null : m.StatusId);
 
     private UnitDto Map(Row r)
     {
@@ -164,6 +253,7 @@ public class UnitsController : ApiControllerBase
         if (occupied && status == "vacant") status = "occupied";
         return new UnitDto(r.U.Id, r.U.Id.ToString(), r.U.BuildingId, r.BCode, Loc(r.BNameEn, r.BNameAr), r.U.UnitNo, r.U.FloorNo,
             Code(r.U.UnitTypeId), Label(r.U.UnitTypeId), r.U.AreaSqm, r.U.Bedrooms, r.U.Bathrooms, r.U.RentAmount, status, Label(r.U.StatusId),
-            r.TenantId, Loc(r.TenantEn, r.TenantAr), r.ContractId, r.ContractNo, r.MeterId, r.MeterNo, r.U.LastInspectionDate, r.U.Notes);
+            r.TenantId, Loc(r.TenantEn, r.TenantAr), r.ContractId, r.ContractNo, r.MeterId, r.MeterNo, r.U.LastInspectionDate, r.U.Notes, r.U.IsActive,
+            r.MeterId == null ? null : Code(r.MeterStatusId), r.MeterId == null ? null : Label(r.MeterStatusId));
     }
 }

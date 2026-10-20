@@ -32,9 +32,11 @@ public class PostingService
     private readonly ICurrentUser _user;
     private readonly ILogger<PostingService> _log;
 
-    public PostingService(AppDbContext db, NumberingService numbers, LookupService lookups, ICurrentUser user, ILogger<PostingService> log)
+    private readonly PartyService _parties;
+
+    public PostingService(AppDbContext db, NumberingService numbers, LookupService lookups, ICurrentUser user, ILogger<PostingService> log, PartyService parties)
     {
-        _db = db; _numbers = numbers; _lookups = lookups; _user = user; _log = log;
+        _db = db; _numbers = numbers; _lookups = lookups; _user = user; _log = log; _parties = parties;
     }
 
     public record Line(long AccountId, decimal Debit, decimal Credit, string? Description = null,
@@ -135,8 +137,7 @@ public class PostingService
     public Task<JournalEntry?> PostInvoiceAsync(Invoice inv, IReadOnlyList<InvoiceItem> items) => TryAsync(async () =>
     {
         var companyId = await CompanyIdAsync(inv.BranchId);
-        var tenant = await _db.Tenants.AsNoTracking().FirstAsync(t => t.Id == inv.TenantId);
-        var ar = tenant.ReceivableAccountId ?? await MapAsync(companyId, inv.BranchId, MappingSources.Receivable, null, true);
+        var ar = await _parties.AccountIdAsync(inv.TenantId) ?? await MapAsync(companyId, inv.BranchId, MappingSources.Receivable, null, true);
         if (ar == null) return null;
         var lines = new List<Line> { new(ar.Value, inv.TotalAmount ?? 0, 0, $"Invoice {inv.InvoiceNo}", inv.BuildingId, null, inv.TenantId, null, inv.ContractId) };
         foreach (var it in items)
@@ -147,9 +148,23 @@ public class PostingService
         }
         if ((inv.VatAmount ?? 0) > 0)
         {
-            var vat = await MapAsync(companyId, inv.BranchId, MappingSources.Vat, null, false);
-            if (vat == null) return null;
-            lines.Add(new(vat.Value, 0, inv.VatAmount!.Value, "Output VAT", inv.BuildingId, null, inv.TenantId, null, inv.ContractId));
+            // output VAT per tax code account (tax_rate.output_account_id), else the «vat» mapping; rounding difference goes to the largest group
+            var groups = await VatGroupsAsync(items.Select(i => (i.TaxRateId, Vat: (i.Amount ?? 0) * (i.VatRate ?? 0) / 100m)), true);
+            var fallback = await MapAsync(companyId, inv.BranchId, MappingSources.Vat, null, false);
+            var posted = 0m;
+            var parts = new List<(long Acc, decimal Amt)>();
+            foreach (var g in groups)
+            {
+                var acc = g.AccountId ?? fallback;
+                if (acc == null) return null;
+                var amt = Math.Round(g.Vat, 2, MidpointRounding.AwayFromZero);
+                parts.Add((acc.Value, amt)); posted += amt;
+            }
+            if (parts.Count == 0) { if (fallback == null) return null; parts.Add((fallback.Value, 0)); }
+            var diff = inv.VatAmount!.Value - posted;
+            if (diff != 0) { var i0 = parts.FindIndex(q => q.Amt == parts.Max(x => x.Amt)); parts[i0] = (parts[i0].Acc, parts[i0].Amt + diff); }
+            foreach (var p in parts.GroupBy(q => q.Acc).Select(q => (Acc: q.Key, Amt: q.Sum(x => x.Amt))).Where(q => q.Amt != 0))
+                lines.Add(new(p.Acc, 0, p.Amt, "Output VAT", inv.BuildingId, null, inv.TenantId, null, inv.ContractId));
         }
         return await CreateEntryAsync(inv.BranchId, inv.IssueDate, $"Invoice {inv.InvoiceNo}", "invoice", inv.Id, lines, true, inv.CurrencyId);
     }, $"invoice {inv.InvoiceNo}");
@@ -158,9 +173,8 @@ public class PostingService
     public Task<JournalEntry?> PostPaymentAsync(Payment pay) => TryAsync(async () =>
     {
         var companyId = await CompanyIdAsync(pay.BranchId);
-        var tenant = await _db.Tenants.AsNoTracking().FirstAsync(t => t.Id == pay.TenantId);
         var cash = await MapAsync(companyId, pay.BranchId, MappingSources.Payment, pay.PaymentMethodId, true);
-        var ar = tenant.ReceivableAccountId ?? await MapAsync(companyId, pay.BranchId, MappingSources.Receivable, null, true);
+        var ar = await _parties.AccountIdAsync(pay.TenantId) ?? await MapAsync(companyId, pay.BranchId, MappingSources.Receivable, null, true);
         if (cash == null || ar == null) return null;
         return await CreateEntryAsync(pay.BranchId, pay.PaymentDate, $"Receipt {pay.ReceiptNo}", "payment", pay.Id, new[]
         {
@@ -169,12 +183,50 @@ public class PostingService
         }, true, pay.CurrencyId);
     }, $"payment {pay.ReceiptNo}");
 
+    /// <summary>Credit note (mirror of the invoice): Dr revenue per credited line, Dr output VAT, Cr A/R.</summary>
+    public Task<JournalEntry?> PostCreditNoteAsync(CreditNote cn, IReadOnlyList<CreditNoteLine> lines) => TryAsync(async () =>
+    {
+        var companyId = await CompanyIdAsync(cn.BranchId);
+        var ar = await _parties.AccountIdAsync(cn.TenantId) ?? await MapAsync(companyId, cn.BranchId, MappingSources.Receivable, null, true);
+        if (ar == null) return null;
+        var text = $"Credit note {cn.CreditNoteNo}";
+        var jl = new List<Line>();
+        foreach (var l in lines.Where(x => x.Amount > 0))
+        {
+            var acc = await MapAsync(companyId, cn.BranchId, MappingSources.InvoiceItem, l.ItemTypeId, false);
+            if (acc == null) return null;
+            jl.Add(new(acc.Value, l.Amount, 0, l.Description ?? text, cn.BuildingId, null, cn.TenantId, null, cn.ContractId));
+        }
+        if (cn.VatAmount > 0)
+        {
+            var vat = await MapAsync(companyId, cn.BranchId, MappingSources.Vat, null, false);
+            if (vat == null) return null;
+            jl.Add(new(vat.Value, cn.VatAmount, 0, "Output VAT reversal", cn.BuildingId, null, cn.TenantId, null, cn.ContractId));
+        }
+        jl.Add(new(ar.Value, 0, cn.TotalAmount, text, cn.BuildingId, null, cn.TenantId, null, cn.ContractId));
+        return await CreateEntryAsync(cn.BranchId, cn.IssueDate, text, "credit_note", cn.Id, jl, true);
+    }, $"credit note {cn.CreditNoteNo}");
+
+    /// <summary>Customer refund: Dr A/R (the customer's credit is used up), Cr cash/bank by payment method.</summary>
+    public Task<JournalEntry?> PostCustomerRefundAsync(CustomerRefund r) => TryAsync(async () =>
+    {
+        var companyId = await CompanyIdAsync(r.BranchId);
+        var ar = await _parties.AccountIdAsync(r.TenantId) ?? await MapAsync(companyId, r.BranchId, MappingSources.Receivable, null, true);
+        var cash = await MapAsync(companyId, r.BranchId, MappingSources.Payment, r.PaymentMethodId, true);
+        if (ar == null || cash == null) return null;
+        var text = $"Customer refund {r.RefundNo}";
+        return await CreateEntryAsync(r.BranchId, r.RefundDate, text, "customer_refund", r.Id, new[]
+        {
+            new Line(ar.Value, r.Amount, 0, text, TenantId: r.TenantId),
+            new Line(cash.Value, 0, r.Amount, text, TenantId: r.TenantId),
+        }, true);
+    }, $"customer refund {r.RefundNo}");
+
     /// <summary>Dr expense per item, Dr input VAT, Cr A/P.</summary>
     public Task<JournalEntry?> PostVendorBillAsync(VendorBill bill, IReadOnlyList<VendorBillItem> items) => TryAsync(async () =>
     {
         var companyId = await CompanyIdAsync(bill.BranchId);
-        var vendor = await _db.Vendors.AsNoTracking().FirstAsync(v => v.Id == bill.VendorId);
-        var ap = vendor.PayableAccountId ?? await MapAsync(companyId, bill.BranchId, MappingSources.Payable, null, false);
+        var ap = await _parties.AccountIdAsync(bill.VendorId) ?? await MapAsync(companyId, bill.BranchId, MappingSources.Payable, null, false);
         if (ap == null) return null;
         var lines = new List<Line>();
         foreach (var it in items)
@@ -185,9 +237,22 @@ public class PostingService
         }
         if ((bill.VatAmount ?? 0) > 0)
         {
-            var vat = await MapAsync(companyId, bill.BranchId, MappingSources.VatInput, null, true);
-            if (vat == null) return null;
-            lines.Add(new(vat.Value, bill.VatAmount!.Value, 0, "Input VAT", VendorId: bill.VendorId));
+            var groups = await VatGroupsAsync(items.Select(i => (i.TaxRateId, Vat: (i.Amount ?? 0) * (i.VatRate ?? 0) / 100m)), false);
+            var fallback = await MapAsync(companyId, bill.BranchId, MappingSources.VatInput, null, true);
+            var posted = 0m;
+            var parts = new List<(long Acc, decimal Amt)>();
+            foreach (var g in groups)
+            {
+                var acc = g.AccountId ?? fallback;
+                if (acc == null) return null;
+                var amt = Math.Round(g.Vat, 2, MidpointRounding.AwayFromZero);
+                parts.Add((acc.Value, amt)); posted += amt;
+            }
+            if (parts.Count == 0) { if (fallback == null) return null; parts.Add((fallback.Value, 0)); }
+            var diff = bill.VatAmount!.Value - posted;
+            if (diff != 0) { var i0 = parts.FindIndex(q => q.Amt == parts.Max(x => x.Amt)); parts[i0] = (parts[i0].Acc, parts[i0].Amt + diff); }
+            foreach (var p in parts.GroupBy(q => q.Acc).Select(q => (Acc: q.Key, Amt: q.Sum(x => x.Amt))).Where(q => q.Amt != 0))
+                lines.Add(new(p.Acc, p.Amt, 0, "Input VAT", VendorId: bill.VendorId));
         }
         lines.Add(new(ap.Value, 0, bill.TotalAmount ?? 0, $"Bill {bill.BillNo}", VendorId: bill.VendorId));
         return await CreateEntryAsync(bill.BranchId, bill.BillDate, $"Vendor bill {bill.BillNo}", "vendor_bill", bill.Id, lines, true, bill.CurrencyId);
@@ -197,8 +262,7 @@ public class PostingService
     public Task<JournalEntry?> PostVendorPaymentAsync(VendorPayment vp) => TryAsync(async () =>
     {
         var companyId = await CompanyIdAsync(vp.BranchId);
-        var vendor = await _db.Vendors.AsNoTracking().FirstAsync(v => v.Id == vp.VendorId);
-        var ap = vendor.PayableAccountId ?? await MapAsync(companyId, vp.BranchId, MappingSources.Payable, null, false);
+        var ap = await _parties.AccountIdAsync(vp.VendorId) ?? await MapAsync(companyId, vp.BranchId, MappingSources.Payable, null, false);
         var bank = await MapAsync(companyId, vp.BranchId, MappingSources.VendorPayment, vp.PaymentMethodId, false);
         if (ap == null || bank == null) return null;
         return await CreateEntryAsync(vp.BranchId, vp.PaymentDate, $"Vendor payment {vp.PaymentNo}", "vendor_payment", vp.Id, new[]
@@ -207,6 +271,37 @@ public class PostingService
             new Line(bank.Value, 0, vp.Amount, $"Vendor payment {vp.PaymentNo}", VendorId: vp.VendorId),
         }, true, vp.CurrencyId);
     }, $"vendor payment {vp.PaymentNo}");
+
+    /// <summary>
+    /// General voucher: receipt → Dr cash/bank (by payment method) / Cr the chosen account; payment → Dr the account / Cr cash/bank.
+    /// Unlike documents, a voucher is nothing without its entry, so a missing cash mapping is an error.
+    /// </summary>
+    public async Task<JournalEntry> PostVoucherAsync(Voucher v)
+    {
+        var companyId = await CompanyIdAsync(v.BranchId);
+        var receipt = v.VoucherType == "receipt";
+        var cash = receipt
+            ? await MapAsync(companyId, v.BranchId, MappingSources.Payment, v.PaymentMethodId, true)
+            : await MapAsync(companyId, v.BranchId, MappingSources.VendorPayment, v.PaymentMethodId, false);
+        if (cash == null) throw new AppException("No cash / bank account is mapped for this payment method. Set it under Accounting > Account mappings.");
+        if (cash.Value == v.AccountId) throw new AppException("The voucher account cannot be the same cash / bank account.");
+        var text = $"{(receipt ? "Receipt" : "Payment")} voucher {v.VoucherNo} — {v.PartyName}{(string.IsNullOrWhiteSpace(v.Description) ? "" : $": {v.Description}")}";
+        return await CreateEntryAsync(v.BranchId, v.VoucherDate, text, "voucher", v.Id, receipt
+            ? new[] { new Line(cash.Value, v.Amount, 0, text, BuildingId: v.BuildingId), new Line(v.AccountId, 0, v.Amount, text, BuildingId: v.BuildingId) }
+            : new[] { new Line(v.AccountId, v.Amount, 0, text, BuildingId: v.BuildingId), new Line(cash.Value, 0, v.Amount, text, BuildingId: v.BuildingId) },
+            true);
+    }
+
+    /// <summary>VAT of document lines grouped by the tax code's output (sales) or input (purchases) account; null account = use the mapping.</summary>
+    private async Task<List<(long? AccountId, decimal Vat)>> VatGroupsAsync(IEnumerable<(long? TaxRateId, decimal Vat)> lines, bool output)
+    {
+        var list = lines.Where(l => l.Vat != 0).ToList();
+        var ids = list.Where(l => l.TaxRateId != null).Select(l => l.TaxRateId!.Value).Distinct().ToList();
+        var acc = await _db.TaxRates.AsNoTracking().Where(t => ids.Contains(t.Id))
+            .Select(t => new { t.Id, A = output ? t.OutputAccountId : t.InputAccountId }).ToDictionaryAsync(t => t.Id, t => t.A);
+        return list.GroupBy(l => l.TaxRateId == null ? null : acc.GetValueOrDefault(l.TaxRateId.Value))
+            .Select(g => (g.Key, g.Sum(x => x.Vat))).ToList();
+    }
 
     /// <summary>Creates a posted mirror entry and marks the original as reversed.</summary>
     public async Task<JournalEntry> ReverseAsync(long journalEntryId, DateOnly date, string reason)

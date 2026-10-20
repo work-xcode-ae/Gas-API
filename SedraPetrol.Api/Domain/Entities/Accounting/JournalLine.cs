@@ -70,5 +70,5 @@ public partial class JournalLine : AuditableEntity
     public Vendor? Vendor { get; set; }
 
     [ForeignKey(nameof(ContractId)), JsonIgnore]
-    public SupplyContract? Contract { get; set; }
+    public Contract? Contract { get; set; }
 }

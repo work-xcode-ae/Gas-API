@@ -21,9 +21,11 @@ public class ExceptionMiddleware
         try
         {
             await _next(ctx);
+            if (ctx.Response.StatusCode == 403) await TrailRejected(ctx, 403, "Permission denied.", "forbidden");
         }
         catch (AppException ex)
         {
+            await TrailRejected(ctx, ex.StatusCode, ex.Message, ex.Code);
             await Write(ctx, ex.StatusCode, ex.Message, ex.Code);
         }
         catch (DbUpdateException ex) when (ex.InnerException is SqlException sql)
@@ -36,6 +38,7 @@ public class ExceptionMiddleware
                 _ => (500, _env.IsDevelopment() ? sql.Message : "Database error.", "db_error")
             };
             if (status == 500) _logger.LogError(ex, "Database error");
+            await TrailRejected(ctx, status, msg, code);
             await Write(ctx, status, msg, code);
         }
         catch (Exception ex)
@@ -43,6 +46,37 @@ public class ExceptionMiddleware
             _logger.LogError(ex, "Unhandled exception");
             await Write(ctx, 500, _env.IsDevelopment() ? ex.ToString() : "An unexpected error occurred.", "server_error");
         }
+    }
+
+    /// <summary>
+    /// Audit trail row for a refused change (validation / business rule / permission / database error) — so attempts are tracked too.
+    /// Written through a NEW DbContext so nothing pending from the failed request is saved. GET requests are not logged.
+    /// </summary>
+    private async Task TrailRejected(HttpContext ctx, int status, string message, string? code)
+    {
+        if (HttpMethods.IsGet(ctx.Request.Method) || HttpMethods.IsOptions(ctx.Request.Method) || HttpMethods.IsHead(ctx.Request.Method)) return;
+        var path = ctx.Request.Path.Value ?? "";
+        if (path.StartsWith("/api/track", StringComparison.OrdinalIgnoreCase) || path.StartsWith("/api/auth/login", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/api/auth/refresh", StringComparison.OrdinalIgnoreCase) || path.StartsWith("/api/auth/logout", StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            using var scope = ctx.RequestServices.GetRequiredService<IServiceScopeFactory>().CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<SedraPetrol.Api.Data.AppDbContext>();
+            var me = ctx.RequestServices.GetService<ICurrentUser>();
+            // /api/<resource>/<id>/… → record id when the path names one
+            var seg = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            string? recId = seg.Length >= 3 && long.TryParse(seg[2], out _) ? seg[2] : null;
+            db.AuditTrails.Add(new SedraPetrol.Api.Domain.Entities.AuditTrail
+            {
+                OccurredAt = DateTimeOffset.UtcNow, TransactionId = Guid.NewGuid(), UserId = me?.UserId, UserName = ctx.User?.Identity?.Name, BranchId = me?.BranchId,
+                Action = "rejected", TableName = seg.Length >= 2 ? seg[1] : null, EntityId = recId,
+                Changes = System.Text.Json.JsonSerializer.Serialize(new { status, code, message = message.Length > 500 ? message[..500] : message }),
+                HttpMethod = ctx.Request.Method, RequestPath = path.Length > 300 ? path[..300] : path,
+                IpAddress = ctx.Connection.RemoteIpAddress?.ToString(),
+            });
+            await db.SaveChangesAsync();
+        }
+        catch (Exception ex) { _logger.LogWarning(ex, "Could not write the rejected-request audit row"); }
     }
 
     private static string ExtractIndex(string message)

@@ -34,6 +34,9 @@ public static class PermissionCatalog
         ("accounting", "Accounting", "المحاسبة"),
         ("documents", "Documents", "المستندات"),
         ("reports", "Reports", "التقارير"),
+        ("audit", "Audit trail", "سجل التدقيق"),
+        ("employees", "Employees", "الموظفون"),
+        ("assets", "Company assets", "الأصول"),
     };
 
     public static readonly (string Code, string Module, string NameEn, string NameAr)[] Special =

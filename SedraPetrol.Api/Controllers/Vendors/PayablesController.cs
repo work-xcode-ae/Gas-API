@@ -32,9 +32,9 @@ public class VendorBillsController : ApiControllerBase
             var open = new[] { await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "pending"), await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "partial") };
             query = query.Where(b => open.Contains(b.StatusId));
         }
-        if (!string.IsNullOrWhiteSpace(q.Search)) query = query.Where(b => b.BillNo.Contains(q.Search) || (b.Vendor!.NameAr ?? "").Contains(q.Search) || (b.Vendor.NameEn ?? "").Contains(q.Search));
+        if (!string.IsNullOrWhiteSpace(q.Search)) query = query.Where(b => b.BillNo.Contains(q.Search) || (b.Vendor!.Party!.NameAr ?? "").Contains(q.Search) || (b.Vendor.Party!.NameEn ?? "").Contains(q.Search));
         var page = await query.OrderByDescending(b => b.BillDate).ThenByDescending(b => b.Id)
-            .Select(b => new { B = b, b.Vendor!.NameEn, b.Vendor.NameAr }).ToPagedAsync(q, ct);
+            .Select(b => new { B = b, b.Vendor!.Party!.NameEn, b.Vendor.Party!.NameAr }).ToPagedAsync(q, ct);
         var paid = await Billing.PaidByBillAsync(page.Items.Select(x => x.B.Id));
         return Ok(new PagedResult<object>(page.Items.Select(x => (object)new
         {
@@ -107,7 +107,7 @@ public class VendorPaymentsController : ApiControllerBase
         if (to != null) query = query.Where(p => p.PaymentDate <= to);
         if (!string.IsNullOrWhiteSpace(q.Search)) query = query.Where(p => p.PaymentNo.Contains(q.Search) || (p.ReferenceNo ?? "").Contains(q.Search));
         var page = await query.OrderByDescending(p => p.PaymentDate).ThenByDescending(p => p.Id)
-            .Select(p => new { P = p, p.Vendor!.NameEn, p.Vendor.NameAr, Allocated = Db.VendorPaymentAllocations.Where(a => a.VendorPaymentId == p.Id).Sum(a => (decimal?)a.Amount) ?? 0 })
+            .Select(p => new { P = p, p.Vendor!.Party!.NameEn, p.Vendor.Party!.NameAr, Allocated = Db.VendorPaymentAllocations.Where(a => a.VendorPaymentId == p.Id).Sum(a => (decimal?)a.Amount) ?? 0 })
             .ToPagedAsync(q, ct);
         return Ok(new PagedResult<object>(page.Items.Select(x => (object)new
         {

@@ -13,7 +13,8 @@ public class TokenService
     private readonly JwtOptions _opt;
     public TokenService(IOptions<JwtOptions> opt) => _opt = opt.Value;
 
-    public (string Token, DateTime ExpiresAt) Create(AppUser user, IEnumerable<string> roles, IEnumerable<string> permissions, IEnumerable<long> branchIds)
+    /// <param name="sessionId">Refresh-token family of the session («sid» claim): a revoked session is refused at once, not only when the token expires.</param>
+    public (string Token, DateTime ExpiresAt) Create(AppUser user, IEnumerable<string> roles, IEnumerable<string> permissions, IEnumerable<long> branchIds, Guid? sessionId = null)
     {
         var claims = new List<Claim>
         {
@@ -25,6 +26,8 @@ public class TokenService
             new(AppClaims.Branches, string.Join(',', branchIds)),
         };
         if (user.BranchId.HasValue) claims.Add(new Claim(AppClaims.BranchId, user.BranchId.Value.ToString()));
+        if (sessionId != null) claims.Add(new Claim("sid", sessionId.Value.ToString()));
+        claims.Add(new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")));
         claims.AddRange(roles.Select(r => new Claim(ClaimTypes.Role, r)));
         claims.AddRange(permissions.Distinct().Select(p => new Claim(AppClaims.Permission, p)));
 

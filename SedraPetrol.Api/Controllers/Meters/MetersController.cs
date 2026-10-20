@@ -15,9 +15,11 @@ public class MetersController : ApiControllerBase
     private MeterOps Ops => HttpContext.RequestServices.GetRequiredService<MeterOps>();
 
     public record MeterInput(long? BranchId, string? MeterNo, string? Serial, long? UnitId, long? MeterTypeId, string? Type, string? Brand, string? Model,
-        DateOnly? InstallDate, decimal? InitialReading, DateOnly? CalibrationDate, string? Location, string? SimCard, string? Status, string? Notes, bool LinkTenant = true);
-    public record AssignInput(long UnitId, DateOnly? FromDate, bool LinkContract = true);
-    public record UnassignInput(DateOnly? ToDate);
+        DateOnly? InstallDate, decimal? InitialReading, DateOnly? CalibrationDate, string? Location, string? SimCard, string? Status, string? Notes);
+    public record AssignInput(long UnitId, DateOnly? FromDate);
+    /// <summary>Add several meters of the same model to stock: one serial per meter.</summary>
+    public record StockBulkInput(long? BranchId, List<string> Serials, string? Type, string? Brand, string? Model, DateOnly? CalibrationDate, decimal? InitialReading, string? Notes);
+    public record UnassignInput(DateOnly? ToDate, decimal? FinalReading);
     public record ReadingInput(decimal ReadingValue, DateTimeOffset? ReadingDate, string? Method, string? Notes, bool AllowReset = false);
 
     /// <summary>Meters list. Filters: buildingId, unitId, status, type, unassigned, calibrationDueInDays.</summary>
@@ -26,7 +28,7 @@ public class MetersController : ApiControllerBase
         [FromQuery] string? status, [FromQuery] string? type, [FromQuery] bool unassigned = false, [FromQuery] int? calibrationDueInDays = null, CancellationToken ct = default)
     {
         await LoadLookups();
-        var query = Db.Meters.AsNoTracking().Where(m => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(m.BranchId));
+        var query = Db.Meters.AsNoTracking().Where(m => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(m.BranchId ?? 0));
         if (branchId != null) query = query.Where(m => m.BranchId == branchId);
         if (buildingId != null) query = query.Where(m => Db.MeterAssignments.Any(a => a.MeterId == m.Id && a.ToDate == null && a.Unit!.BuildingId == buildingId));
         if (unitId != null) query = query.Where(m => Db.MeterAssignments.Any(a => a.MeterId == m.Id && a.ToDate == null && a.UnitId == unitId));
@@ -47,7 +49,7 @@ public class MetersController : ApiControllerBase
         var row = await Project(Db.Meters.AsNoTracking().Where(m => m.Id == id)).FirstOrDefaultAsync(ct) ?? throw new NotFoundException("Meter", id);
         var dto = (await ToDtos(new[] { row }))[0];
         var readings = await Db.MeterReadings.AsNoTracking().Where(r => r.MeterId == id).OrderByDescending(r => r.ReadingDate).Take(24)
-            .Select(r => new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, r.MethodId, r.InvoiceId, r.Notes, readBy = r.ReadByUser!.NameAr ?? r.ReadByUser.NameEn }).ToListAsync(ct);
+            .Select(r => new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, r.MethodId, r.ReadingTypeId, r.ContractId, r.InvoiceId, r.Notes, readBy = r.ReadByUser!.NameAr ?? r.ReadByUser.NameEn }).ToListAsync(ct);
         var assignments = await Db.MeterAssignments.AsNoTracking().Where(a => a.MeterId == id).OrderByDescending(a => a.FromDate)
             .Select(a => new { a.Id, a.UnitId, a.Unit!.UnitNo, a.Unit.BuildingId, BCode = a.Unit.Building!.Code, a.FromDate, a.ToDate }).ToListAsync(ct);
         var services = await Db.MeterServices.AsNoTracking().Where(s => s.MeterId == id || s.NewMeterId == id).OrderByDescending(s => s.Id).Take(20).ToListAsync(ct);
@@ -57,14 +59,15 @@ public class MetersController : ApiControllerBase
         return Ok(new
         {
             meter = dto,
-            readings = readings.Select(r => new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, method = Code(r.MethodId), billed = r.InvoiceId != null, r.InvoiceId, r.Notes, r.readBy }),
+            readings = readings.Select(r => new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, method = Code(r.MethodId), type = Code(r.ReadingTypeId), typeLabel = Label(r.ReadingTypeId),
+                                                 r.ContractId, billed = r.InvoiceId != null, r.InvoiceId, r.Notes, r.readBy }),
             monthlyConsumption = monthly,
             assignments,
             services = services.Select(s => new { s.Id, s.ServiceNo, type = Code(s.ServiceTypeId), typeLabel = Label(s.ServiceTypeId), status = Code(s.StatusId), s.RequestedDate, s.CompletedDate, s.Reason }),
         });
     }
 
-    /// <summary>Add a meter (AddMeterModal). With unitId the meter is assigned; linkTenant also links it to the unit's active contract.</summary>
+    /// <summary>Add a meter (AddMeterModal). With unitId the meter is installed in that unit (meters belong to units, not tenants).</summary>
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] MeterInput input)
     {
@@ -86,12 +89,20 @@ public class MetersController : ApiControllerBase
             SerialNo = input.Serial.Trim(), IsActive = true,
         };
         await Apply(m, input);
-        m.StatusId = await Lk(LookupTypes.MeterStatus, null, input.Status ?? "active", field: "status");
+        // every meter enters stock first; installing it (below, or later from stock) makes it active
+        m.StatusId = await Lk(LookupTypes.MeterStatus, null, input.Status ?? "in_stock", field: "status");
+        if (input.UnitId != null) m.InstallDate = null;
         Db.Meters.Add(m);
         await Db.SaveChangesAsync();
-        if (input.UnitId != null) await Ops.AssignAsync(m, input.UnitId.Value, input.InstallDate ?? Today, input.LinkTenant);
-        var buildingId = input.UnitId == null ? null : await Db.Units.Where(u => u.Id == input.UnitId).Select(u => (long?)u.BuildingId).FirstOrDefaultAsync();
-        Activity.Log("meter", m.Id, "create", $"Meter {m.MeterNo} installed", buildingId, branchId);
+        Activity.Log("meter", m.Id, "create", $"Meter {m.MeterNo} added to stock", null, branchId);
+        long? buildingId = null;
+        if (input.UnitId != null)
+        {
+            await Ops.AssignAsync(m, input.UnitId.Value, input.InstallDate ?? Today);
+            var u = await Db.Units.Where(x => x.Id == input.UnitId).Select(x => new { x.BuildingId, x.UnitNo }).FirstAsync();
+            buildingId = u.BuildingId;
+            Activity.Log("meter", m.Id, "assign", $"Meter {m.MeterNo} installed in unit {u.UnitNo}", buildingId, branchId);
+        }
         await Db.SaveChangesAsync();
         await tx.CommitAsync();
         return CreatedAtAction(nameof(Get), new { id = m.Id }, new { m.Id, m.MeterNo });
@@ -123,19 +134,59 @@ public class MetersController : ApiControllerBase
         return NoContent();
     }
 
+    /// <summary>Install a meter from stock into a unit.</summary>
     [HttpPost("{id:long}/assign")]
     public async Task<IActionResult> Assign(long id, [FromBody] AssignInput input)
     {
         var m = await Load(id);
-        await Ops.AssignAsync(m, input.UnitId, input.FromDate ?? Today, input.LinkContract);
+        await Ops.AssignAsync(m, input.UnitId, input.FromDate ?? Today);
+        var u = await Db.Units.Where(x => x.Id == input.UnitId).Select(x => new { x.BuildingId, x.UnitNo }).FirstOrDefaultAsync();
+        Activity.Log("meter", m.Id, "assign", $"Meter {m.MeterNo} installed in unit {u?.UnitNo}", u?.BuildingId, m.BranchId);
+        await Db.SaveChangesAsync();
         return NoContent();
+    }
+
+    /// <summary>Add many meters to stock at once (same type / brand, one serial each). Returns the created meters and per-serial errors.</summary>
+    [HttpPost("stock")]
+    public async Task<IActionResult> AddToStock([FromBody] StockBulkInput input)
+    {
+        var branchId = RequireBranch(input.BranchId);
+        EnsureBranchAccess(branchId);
+        var serials = (input.Serials ?? new()).Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
+        if (serials.Count == 0) throw new AppException("Enter at least one serial number.");
+        if (serials.Count > 500) throw new AppException("At most 500 meters at a time.");
+        var dup = serials.GroupBy(x => x, StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1).Select(g => g.Key).ToList();
+        if (dup.Count > 0) throw new AppException($"Repeated serial numbers: {string.Join(", ", dup)}");
+        var existing = await Db.Meters.IgnoreQueryFilters().Where(m => serials.Contains(m.SerialNo)).Select(m => m.SerialNo).ToListAsync();
+        if (existing.Count > 0) throw new BusinessRuleException($"Already registered: {string.Join(", ", existing)}");
+
+        var typeId = await Lk(LookupTypes.MeterType, null, input.Type ?? "standard", field: "type");
+        var stock = await LkId(LookupTypes.MeterStatus, "in_stock");
+        await using var tx = await Db.Database.BeginTransactionAsync();
+        var created = new List<Meter>();
+        foreach (var serial in serials)
+        {
+            var m = new Meter
+            {
+                BranchId = branchId, MeterNo = await Numbers.NextAsync(NumberPrefixes.Meter, yearly: false), SerialNo = serial, IsActive = true,
+                MeterTypeId = typeId, Brand = input.Brand, Model = input.Model, CalibrationDate = input.CalibrationDate,
+                InitialReading = input.InitialReading ?? 0, LocationNote = input.Notes, StatusId = stock,
+            };
+            Db.Meters.Add(m);
+            await Db.SaveChangesAsync();
+            Activity.Log("meter", m.Id, "create", $"Meter {m.MeterNo} added to stock", null, branchId);
+            created.Add(m);
+        }
+        await Db.SaveChangesAsync();
+        await tx.CommitAsync();
+        return Ok(created.Select(m => new { m.Id, m.MeterNo, serial = m.SerialNo }));
     }
 
     [HttpPost("{id:long}/unassign")]
     public async Task<IActionResult> Unassign(long id, [FromBody] UnassignInput input)
     {
         var m = await Load(id);
-        await Ops.UnassignAsync(m, input.ToDate ?? Today);
+        await Ops.UnassignAsync(m, input.ToDate ?? Today, input.FinalReading);
         return NoContent();
     }
 
@@ -149,7 +200,8 @@ public class MetersController : ApiControllerBase
         if (from != null) query = query.Where(r => r.ReadingDate >= from);
         if (to != null) query = query.Where(r => r.ReadingDate <= to);
         var page = await query.OrderByDescending(r => r.ReadingDate).ToPagedAsync(q);
-        return Ok(new PagedResult<object>(page.Items.Select(r => (object)new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, method = Code(r.MethodId), billed = r.InvoiceId != null, r.InvoiceId, r.Notes }).ToList(),
+        return Ok(new PagedResult<object>(page.Items.Select(r => (object)new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption, method = Code(r.MethodId), type = Code(r.ReadingTypeId), typeLabel = Label(r.ReadingTypeId),
+            r.UnitId, r.ContractId, billed = r.InvoiceId != null, r.InvoiceId, r.Notes }).ToList(),
             page.Total, page.Page, page.PageSize));
     }
 
@@ -158,6 +210,8 @@ public class MetersController : ApiControllerBase
     public async Task<IActionResult> AddReading(long id, [FromBody] ReadingInput input)
     {
         var m = await Load(id);
+        if (await Lookups.CodeAsync(m.StatusId) is "retired" or "lost")
+            throw new BusinessRuleException($"Meter {m.MeterNo} is retired / lost; readings cannot be recorded.");
         var r = await Ops.AddReadingAsync(m, input.ReadingValue, input.ReadingDate ?? DateTimeOffset.UtcNow, input.Method, input.Notes, input.AllowReset);
         return Ok(new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption });
     }
@@ -211,14 +265,16 @@ public class MetersController : ApiControllerBase
             .GroupBy(r => r.MeterId).Select(g => new { g.Key, Sum = g.Sum(r => r.Consumption ?? 0) }).ToDictionaryAsync(x => x.Key, x => x.Sum);
         var unbilled = await Db.MeterReadings.AsNoTracking().Where(r => ids.Contains(r.MeterId) && r.InvoiceId == null)
             .GroupBy(r => r.MeterId).Select(g => new { g.Key, Sum = g.Sum(r => r.Consumption ?? 0) }).ToDictionaryAsync(x => x.Key, x => x.Sum);
-        var contracts = await Db.SupplyContracts.AsNoTracking().Where(c => c.IsActive && c.MeterId != null && ids.Contains(c.MeterId.Value))
-            .Select(c => new { MeterId = c.MeterId!.Value, c.Id, c.ContractNo, c.TenantId, c.Tenant!.NameEn, c.Tenant.NameAr }).ToListAsync();
+        // tenant of a meter = active contract of the unit the meter is installed in
+        var unitIds = rows.Where(r => r.UnitId != null).Select(r => r.UnitId!.Value).ToList();
+        var contracts = await Db.SupplyContracts.AsNoTracking().Where(c => c.IsActive && c.UnitId != null && unitIds.Contains(c.UnitId.Value))
+            .Select(c => new { c.UnitId, c.Id, c.ContractNo, c.TenantId, c.Tenant!.Party!.NameEn, c.Tenant.Party!.NameAr }).ToListAsync();
         var balances = await HttpContext.RequestServices.GetRequiredService<BalanceQueries>().ByContractAsync(contracts.Select(c => c.Id));
 
         return rows.Select(r =>
         {
             var lr = last.FirstOrDefault(x => x.MeterId == r.M.Id);
-            var c = contracts.FirstOrDefault(x => x.MeterId == r.M.Id);
+            var c = r.UnitId == null ? null : contracts.FirstOrDefault(x => x.UnitId == r.UnitId);
             return (object)new
             {
                 r.M.Id, meterNo = r.M.MeterNo, serial = r.M.SerialNo, unitId = r.UnitId, unit = r.UnitNo, floor = r.Floor,
@@ -230,8 +286,78 @@ public class MetersController : ApiControllerBase
                 tenantId = c?.TenantId, tenant = c == null ? null : Loc(c.NameEn, c.NameAr), contractId = c?.Id, contractNo = c?.ContractNo,
                 brand = r.M.Brand, model = r.M.Model, calibrationDate = r.M.CalibrationDate, simCard = r.M.SimCardNo, initialReading = r.M.InitialReading,
                 location = r.M.LocationNote, r.M.BranchId, r.M.IsActive,
+                calibrationExpiry = CalibrationExpiry(r.M.CalibrationDate), calibrationState = CalibrationState(r.M.CalibrationDate),
             };
         }).ToList();
+    }
+
+    // ---------- calibration validity: a calibration is valid for CalibrationValidMonths (default 12) ----------
+    private int CalibrationValidMonths => HttpContext.RequestServices.GetRequiredService<IConfiguration>().GetValue<int?>("Meters:CalibrationValidMonths") ?? 12;
+    private DateOnly? CalibrationExpiry(DateOnly? calibrated) => calibrated?.AddMonths(CalibrationValidMonths).AddDays(-1);
+    /// <summary>valid | due_soon (≤ 30 days left) | expired | unknown (no calibration date).</summary>
+    private string CalibrationState(DateOnly? calibrated)
+    {
+        var exp = CalibrationExpiry(calibrated);
+        if (exp == null) return "unknown";
+        if (exp < Today) return "expired";
+        return exp <= Today.AddDays(30) ? "due_soon" : "valid";
+    }
+
+    /// <summary>Statuses that mean the meter cannot measure / bill (readings are refused).</summary>
+    public static readonly string[] OutOfServiceStatuses = { "fault", "damaged", "retired", "lost" };
+
+    public record StatusInput(string Status, DateOnly? Date, string? Reason, DateOnly? CalibrationDate);
+
+    /// <summary>
+    /// Change a meter's status (active / fault / damaged / maintenance / disconnected / retired / lost / in_stock, or any value added to the
+    /// METER_STATUS lookup). A reason is required for fault, damaged, retired and lost. Retired / lost meters must be removed from the unit first.
+    /// Optional new calibration date (e.g. after maintenance). Every change is written to the activity log (status history).
+    /// </summary>
+    [HttpPost("{id:long}/status")]
+    public async Task<IActionResult> ChangeStatus(long id, [FromBody] StatusInput input)
+    {
+        await LoadLookups();
+        var m = await Load(id);
+        var newId = await Lk(LookupTypes.MeterStatus, null, input.Status, required: true, field: "status");
+        var code = Code(newId) ?? input.Status;
+        var oldCode = Code(m.StatusId);
+        var oldLabel = Label(m.StatusId);
+        if (newId == m.StatusId && input.CalibrationDate == null) throw new BusinessRuleException("The meter already has this status.");
+        if (OutOfServiceStatuses.Contains(code) && string.IsNullOrWhiteSpace(input.Reason)) throw new AppException("Write the reason for this status.");
+        var date = input.Date ?? Today;
+        if (date > Today) throw new AppException("The status date cannot be in the future.");
+        var assignment = await Db.MeterAssignments.Include(a => a.Unit).FirstOrDefaultAsync(a => a.MeterId == id && a.ToDate == null);
+        if (code is "retired" or "lost" or "in_stock" && assignment != null)
+            throw new BusinessRuleException($"The meter is installed in unit {assignment.Unit?.UnitNo}. Remove it from the unit (or replace it) first.");
+        if (input.CalibrationDate != null)
+        {
+            if (input.CalibrationDate > Today) throw new AppException("Calibration date cannot be in the future.");
+            m.CalibrationDate = input.CalibrationDate;
+        }
+        m.StatusId = newId;
+        m.IsActive = code is not ("retired" or "lost");
+        Activity.Log("meter", m.Id, "status",
+            $"Meter {m.MeterNo}: {oldLabel ?? oldCode ?? "—"} → {Label(newId)}{(string.IsNullOrWhiteSpace(input.Reason) ? "" : $" — {input.Reason.Trim()}")}",
+            assignment?.Unit?.BuildingId, m.BranchId,
+            new { status = oldCode }, new { status = code, date, reason = input.Reason?.Trim(), calibrationDate = input.CalibrationDate });
+        await Db.SaveChangesAsync();
+        return await Get(id, HttpContext.RequestAborted);
+    }
+
+    /// <summary>Status history of a meter (from the activity log).</summary>
+    [HttpGet("{id:long}/status-history")]
+    public async Task<IActionResult> StatusHistory(long id)
+    {
+        var rows = await Db.ActivityLogs.AsNoTracking().Where(a => a.EntityType == "meter" && a.EntityId == id && a.Action == "status")
+            .OrderByDescending(a => a.OccurredAt)
+            .Select(a => new { a.Id, a.OccurredAt, a.Description, a.OldValues, a.NewValues, user = a.User!.NameAr ?? a.User.NameEn }).ToListAsync();
+        return Ok(rows.Select(r =>
+        {
+            System.Text.Json.JsonElement? nv = r.NewValues == null ? null : System.Text.Json.JsonDocument.Parse(r.NewValues).RootElement;
+            System.Text.Json.JsonElement? ov = r.OldValues == null ? null : System.Text.Json.JsonDocument.Parse(r.OldValues).RootElement;
+            string? Str(System.Text.Json.JsonElement? e, string k) => e != null && e.Value.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+            return new { r.Id, r.OccurredAt, r.user, from = Str(ov, "status"), to = Str(nv, "status"), date = Str(nv, "date"), reason = Str(nv, "reason"), r.Description };
+        }));
     }
 }
 
@@ -247,7 +373,7 @@ public class MeterReadingsController : ApiControllerBase
         [FromQuery] DateTimeOffset? to, [FromQuery] bool unbilledOnly = false, CancellationToken ct = default)
     {
         await LoadLookups();
-        var query = Db.MeterReadings.AsNoTracking().Where(r => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(r.Meter!.BranchId));
+        var query = Db.MeterReadings.AsNoTracking().Where(r => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(r.Meter!.BranchId ?? 0));
         if (meterId != null) query = query.Where(r => r.MeterId == meterId);
         if (buildingId != null) query = query.Where(r => Db.MeterAssignments.Any(a => a.MeterId == r.MeterId && a.Unit!.BuildingId == buildingId));
         if (from != null) query = query.Where(r => r.ReadingDate >= from);

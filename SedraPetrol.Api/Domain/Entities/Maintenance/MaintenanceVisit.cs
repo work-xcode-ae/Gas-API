@@ -58,6 +58,22 @@ public partial class MaintenanceVisit : AuditableEntity
     [Column("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>Our employee who carried out the visit (when the visit is done by our own team).</summary>
+    [Column("technician_employee_id")]
+    public long? TechnicianEmployeeId { get; set; }
+
+    /// <summary>Customer satisfaction 1–5 given at the end of the visit.</summary>
+    [Column("customer_rating")]
+    public byte? CustomerRating { get; set; }
+
+    /// <summary>The customer's comments / feedback on the visit.</summary>
+    [Column("customer_feedback"), MaxLength(1000)]
+    public string? CustomerFeedback { get; set; }
+
+    /// <summary>Who gave the feedback / signed on site (owner, building manager, tenant …).</summary>
+    [Column("feedback_by"), MaxLength(150)]
+    public string? FeedbackBy { get; set; }
+
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(BranchId)), JsonIgnore]
     public Branch? Branch { get; set; }
@@ -76,4 +92,7 @@ public partial class MaintenanceVisit : AuditableEntity
 
     [ForeignKey(nameof(StatusId)), JsonIgnore]
     public LookupValue? Status { get; set; }
+
+    [ForeignKey(nameof(TechnicianEmployeeId)), JsonIgnore]
+    public Employee? TechnicianEmployee { get; set; }
 }

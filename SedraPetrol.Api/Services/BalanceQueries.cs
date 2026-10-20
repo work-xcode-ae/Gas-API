@@ -47,19 +47,26 @@ public class BalanceQueries
             Key = byContract ? i.ContractId!.Value : i.TenantId,
             Total = i.TotalAmount ?? 0,
             Overdue = i.DueDate < today,
-            Paid = _db.PaymentAllocations.Where(a => a.InvoiceId == i.Id && !deadPay.Contains(a.Payment!.StatusId)).Sum(a => (decimal?)a.Amount) ?? 0,
+            // settled = receipts allocated + credit notes applied
+            Paid = (_db.PaymentAllocations.Where(a => a.InvoiceId == i.Id && !deadPay.Contains(a.Payment!.StatusId)).Sum(a => (decimal?)a.Amount) ?? 0)
+                 + (_db.CreditNoteAllocations.Where(a => a.InvoiceId == i.Id && a.CreditNote!.Status == "posted").Sum(a => (decimal?)a.Amount) ?? 0),
         }).ToListAsync();
 
         return inv.GroupBy(x => x.Key).ToDictionary(g => g.Key, g => new Balance(
             g.Sum(x => x.Total), g.Sum(x => x.Paid), g.Where(x => x.Overdue).Sum(x => Math.Max(0, x.Total - x.Paid))));
     }
 
-    /// <summary>Unallocated money the tenant paid (credit on account).</summary>
+    /// <summary>
+    /// Credit on account: unallocated receipts + unapplied credit notes − refunds paid out of them.
+    /// </summary>
     public async Task<decimal> TenantCreditAsync(long tenantId)
     {
         var (_, deadPay) = await DeadStatusesAsync();
         var paid = await _db.Payments.Where(p => p.TenantId == tenantId && !deadPay.Contains(p.StatusId)).SumAsync(p => (decimal?)p.Amount) ?? 0;
         var allocated = await _db.PaymentAllocations.Where(a => a.Payment!.TenantId == tenantId && !deadPay.Contains(a.Payment.StatusId)).SumAsync(a => (decimal?)a.Amount) ?? 0;
-        return paid - allocated;
+        var credited = await _db.CreditNotes.Where(c => c.TenantId == tenantId && c.Status == "posted").SumAsync(c => (decimal?)c.TotalAmount) ?? 0;
+        var applied = await _db.CreditNoteAllocations.Where(a => a.CreditNote!.TenantId == tenantId && a.CreditNote.Status == "posted").SumAsync(a => (decimal?)a.Amount) ?? 0;
+        var refunded = await _db.CustomerRefunds.Where(r => r.TenantId == tenantId && r.Status == "posted").SumAsync(r => (decimal?)r.Amount) ?? 0;
+        return paid - allocated + credited - applied - refunded;
     }
 }

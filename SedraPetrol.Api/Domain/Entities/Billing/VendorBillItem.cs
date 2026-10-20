@@ -35,6 +35,10 @@ public partial class VendorBillItem : AuditableEntity
     [Precision(5, 2)]
     public decimal? VatRate { get; set; } = 5m;
 
+    /// <summary>Tax code version applied to this line (tax_rate); the rate itself is frozen in VatRate.</summary>
+    [Column("tax_rate_id")]
+    public long? TaxRateId { get; set; }
+
     [Column("amount")]
     [Precision(14, 2)]
     public decimal? Amount { get; set; }

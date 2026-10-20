@@ -32,8 +32,8 @@ public class TenantsController : ApiControllerBase
         if (!string.IsNullOrWhiteSpace(q.Search))
         {
             var s = q.Search.Trim();
-            query = query.Where(t => t.TenantCode.Contains(s) || (t.NameAr ?? "").Contains(s) || (t.NameEn ?? "").Contains(s) || (t.Phone ?? "").Contains(s)
-                                     || (t.EmiratesId ?? "").Contains(s) || (t.Email ?? "").Contains(s));
+            query = query.Where(t => t.Party!.PartyCode.Contains(s) || (t.Party!.NameAr ?? "").Contains(s) || (t.Party!.NameEn ?? "").Contains(s) || (t.Party!.Phone ?? "").Contains(s)
+                                     || (t.Party!.EmiratesId ?? "").Contains(s) || (t.Party!.Email ?? "").Contains(s));
         }
         var rows = query.OrderByDescending(t => t.Id).Select(t => new
         {
@@ -41,9 +41,11 @@ public class TenantsController : ApiControllerBase
             C = Db.SupplyContracts.Where(c => c.TenantId == t.Id && c.IsActive).OrderByDescending(c => c.StartDate)
                 .Select(c => new CRow
                 {
-                    Id = c.Id, ContractNo = c.ContractNo, StartDate = c.StartDate, EndDate = c.EndDate, DepositPaid = c.DepositPaid, UnitId = c.UnitId,
+                    Id = c.Id, ContractNo = c.ContractNo, StartDate = c.StartDate, EndDate = c.EndDate, DepositPaid = c.DepositPaid, UnitId = c.UnitId!.Value,
                     UnitNo = c.Unit!.UnitNo, FloorNo = c.Unit.FloorNo, BuildingId = c.Unit.BuildingId, BCode = c.Unit.Building!.Code,
-                    BEn = c.Unit.Building.NameEn, BAr = c.Unit.Building.NameAr, MeterNo = c.Meter!.MeterNo, MeterId = c.MeterId,
+                    BEn = c.Unit.Building.NameEn, BAr = c.Unit.Building.NameAr,
+                    MeterNo = Db.MeterAssignments.Where(a => a.UnitId == c.UnitId && a.ToDate == null).Select(a => a.Meter!.MeterNo).FirstOrDefault(),
+                    MeterId = Db.MeterAssignments.Where(a => a.UnitId == c.UnitId && a.ToDate == null).Select(a => (long?)a.MeterId).FirstOrDefault(),
                 })
                 .FirstOrDefault(),
         });
@@ -65,8 +67,8 @@ public class TenantsController : ApiControllerBase
 
         object Dto(Tenant t, CRow? c, BalanceQueries.Balance? b) => new
         {
-            t.Id, code = t.TenantCode, name = Loc(t.NameEn, t.NameAr), t.NameEn, t.NameAr, avatar = Initials(t.NameAr ?? t.NameEn), t.Phone, t.Email, t.EmiratesId,
-            nationality = Label(t.NationalityId), t.IsActive, t.BranchId,
+            t.Id, code = t.Party!.PartyCode, name = Loc(t.Party!.NameEn, t.Party!.NameAr), t.Party!.NameEn, t.Party!.NameAr, avatar = Initials(t.Party!.NameAr ?? t.Party!.NameEn), t.Party!.Phone, t.Party!.Email, t.Party!.EmiratesId,
+            nationality = Label(t.Party!.NationalityId), t.IsActive, t.BranchId,
             contractId = c?.Id, contractNo = c?.ContractNo, contractStart = c?.StartDate, contractEnd = c?.EndDate,
             depositPaid = c?.DepositPaid, unitId = c?.UnitId, unit = c?.UnitNo, floor = c?.FloorNo,
             buildingId = c?.BuildingId, buildingCode = c?.BCode, building = c == null ? null : Loc(c.BEn, c.BAr),
@@ -75,29 +77,67 @@ public class TenantsController : ApiControllerBase
         };
     }
 
+    public record ActiveInput(bool IsActive, string? Reason);
+
+    /// <summary>KPIs of the customers page: counts, outstanding and overdue totals (branch-scoped).</summary>
+    [HttpGet("summary")]
+    public async Task<IActionResult> Summary([FromQuery] long? branchId, CancellationToken ct)
+    {
+        var query = Db.Tenants.AsNoTracking().Where(t => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(t.BranchId));
+        if (branchId != null) query = query.Where(t => t.BranchId == branchId);
+        var ids = await query.Select(t => t.Id).ToListAsync(ct);
+        var active = await query.CountAsync(t => t.IsActive, ct);
+        var withContract = await query.CountAsync(t => Db.SupplyContracts.Any(c => c.TenantId == t.Id && c.IsActive), ct);
+        var bal = await Balances.ByTenantAsync(ids);
+        var monthStart = new DateOnly(Today.Year, Today.Month, 1);
+        var newThisMonth = await query.CountAsync(t => t.CreatedAt >= new DateTimeOffset(monthStart.ToDateTime(TimeOnly.MinValue), TimeSpan.Zero), ct);
+        return Ok(new
+        {
+            total = ids.Count, active, inactive = ids.Count - active, withContract, newThisMonth,
+            withBalance = bal.Values.Count(b => b.Outstanding > 0), outstanding = bal.Values.Sum(b => b.Outstanding),
+            overdueCount = bal.Values.Count(b => b.Overdue > 0), overdue = bal.Values.Sum(b => b.Overdue),
+        });
+    }
+
+    /// <summary>Deactivate / re-activate a customer (kept with its history). A customer with an active contract cannot be deactivated.</summary>
+    [HttpPatch("{id:long}/active")]
+    public async Task<IActionResult> SetActive(long id, [FromBody] ActiveInput input)
+    {
+        var t = await Db.Tenants.FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Tenant", id);
+        EnsureBranchAccess(t.BranchId);
+        if (!input.IsActive && await Db.SupplyContracts.AnyAsync(c => c.TenantId == id && c.IsActive))
+            throw new BusinessRuleException("The customer has an active supply contract. Terminate it first.");
+        t.IsActive = input.IsActive;
+        Activity.Log("tenant", t.Id, "status_change", $"Customer {t.Party!.PartyCode} {(input.IsActive ? "re-activated" : "deactivated")}{(string.IsNullOrWhiteSpace(input.Reason) ? "" : ": " + input.Reason)}", null, t.BranchId);
+        await Db.SaveChangesAsync();
+        return NoContent();
+    }
+
     /// <summary>Tenant profile (TenantProfileDrawer).</summary>
     [HttpGet("{id:long}")]
     public async Task<IActionResult> Get(long id, CancellationToken ct)
     {
         await LoadLookups();
-        var t = await Db.Tenants.AsNoTracking().Include(x => x.City).FirstOrDefaultAsync(x => x.Id == id, ct) ?? throw new NotFoundException("Tenant", id);
+        var t = await Db.Tenants.AsNoTracking().Include(x => x.Party!.City).FirstOrDefaultAsync(x => x.Id == id, ct) ?? throw new NotFoundException("Tenant", id);
         EnsureBranchAccess(t.BranchId);
         var contracts = await Db.SupplyContracts.AsNoTracking().Where(c => c.TenantId == id).OrderByDescending(c => c.IsActive).ThenByDescending(c => c.StartDate)
             .Select(c => new { c.Id, c.ContractNo, c.StatusId, c.IsActive, c.StartDate, c.EndDate, c.DepositAmount, c.DepositPaid, c.UnitId, c.Unit!.UnitNo, c.Unit.FloorNo, c.Unit.RentAmount,
-                               c.Unit.BuildingId, BCode = c.Unit.Building!.Code, BEn = c.Unit.Building.NameEn, BAr = c.Unit.Building.NameAr, c.MeterId, MeterNo = c.Meter!.MeterNo })
+                               c.Unit.BuildingId, BCode = c.Unit.Building!.Code, BEn = c.Unit.Building.NameEn, BAr = c.Unit.Building.NameAr,
+                               MeterId = Db.MeterAssignments.Where(a => a.UnitId == c.UnitId && a.ToDate == null).Select(a => (long?)a.MeterId).FirstOrDefault(),
+                               MeterNo = Db.MeterAssignments.Where(a => a.UnitId == c.UnitId && a.ToDate == null).Select(a => a.Meter!.MeterNo).FirstOrDefault() })
             .ToListAsync(ct);
         var bal = (await Balances.ByTenantAsync(new[] { id })).GetValueOrDefault(id) ?? new BalanceQueries.Balance(0, 0, 0);
         var credit = await Balances.TenantCreditAsync(id);
         var current = contracts.FirstOrDefault(c => c.IsActive) ?? contracts.FirstOrDefault();
-        var lastReading = current?.MeterId == null ? null : await Db.MeterReadings.AsNoTracking().Where(r => r.MeterId == current.MeterId)
+        var lastReading = current == null ? null : await Db.MeterReadings.AsNoTracking().Where(r => r.ContractId == current.Id)
             .OrderByDescending(r => r.ReadingDate).Select(r => new { r.ReadingDate, r.ReadingValue, r.Consumption }).FirstOrDefaultAsync(ct);
-        var unbilledM3 = current?.MeterId == null ? 0 : await Db.MeterReadings.Where(r => r.MeterId == current.MeterId && r.InvoiceId == null).SumAsync(r => r.Consumption ?? 0, ct);
+        var unbilledM3 = current == null ? 0 : await Db.MeterReadings.Where(r => r.ContractId == current.Id && r.InvoiceId == null).SumAsync(r => r.Consumption ?? 0, ct);
 
         return Ok(new
         {
-            t.Id, code = t.TenantCode, name = Loc(t.NameEn, t.NameAr), t.NameEn, t.NameAr, avatar = Initials(t.NameAr ?? t.NameEn),
-            t.Phone, t.Email, t.EmiratesId, nationality = Label(t.NationalityId), nationalityCode = Code(t.NationalityId), t.NationalityId,
-            dob = t.DateOfBirth, t.CityId, city = Loc(t.City?.NameEn, t.City?.NameAr), t.Address, t.IsActive, t.BranchId, t.CreatedAt,
+            t.Id, code = t.Party!.PartyCode, name = Loc(t.Party!.NameEn, t.Party!.NameAr), t.Party!.NameEn, t.Party!.NameAr, avatar = Initials(t.Party!.NameAr ?? t.Party!.NameEn),
+            t.Party!.Phone, t.Party!.Email, t.Party!.EmiratesId, nationality = Label(t.Party!.NationalityId), nationalityCode = Code(t.Party!.NationalityId), t.Party!.NationalityId,
+            dob = t.Party!.DateOfBirth, t.Party!.CityId, city = Loc(t.Party!.City?.NameEn, t.Party!.City?.NameAr), t.Party!.Address, t.IsActive, t.BranchId, t.CreatedAt,
             unitId = current?.UnitId, unit = current?.UnitNo, floor = current?.FloorNo, rent = current?.RentAmount,
             buildingId = current?.BuildingId, buildingCode = current?.BCode, building = current == null ? null : Loc(current.BEn, current.BAr),
             meterId = current?.MeterId, meterNo = current?.MeterNo,
@@ -124,10 +164,15 @@ public class TenantsController : ApiControllerBase
         await CheckEmiratesId(input.EmiratesId, null);
 
         await using var tx = await Db.Database.BeginTransactionAsync();
-        var t = new Tenant { BranchId = branchId, TenantCode = await Numbers.NextAsync(NumberPrefixes.Tenant, yearly: false), IsActive = true };
+        // the same person may already be in the system (owner, supplier, employee …): reuse the party, add the customer role
+        var eid = string.IsNullOrWhiteSpace(input.EmiratesId) ? null : input.EmiratesId.Trim();
+        var party = eid == null ? null : await Db.Parties.FirstOrDefaultAsync(p => p.EmiratesId == eid);
+        party ??= await Parties.NewAsync(branchId, new PartyService.PartyInput { NameAr = input.NameAr, NameEn = input.NameEn });
+        var t = new Tenant { Party = party, BranchId = branchId, IsActive = true };
         await Apply(t, input);
         Db.Tenants.Add(t);
         await Db.SaveChangesAsync();
+        await Parties.EnsureAccountAsync(t.Id);
 
         long? contractId = null;
         if (input.Contract != null || input.UnitId != null)
@@ -136,10 +181,10 @@ public class TenantsController : ApiControllerBase
             ci = ci with { TenantId = t.Id, UnitId = ci.UnitId ?? input.UnitId };
             contractId = (await HttpContext.RequestServices.GetRequiredService<ContractService>().CreateAsync(ci)).Id;
         }
-        Activity.Log("tenant", t.Id, "create", $"Tenant {t.TenantCode} created", null, t.BranchId);
+        Activity.Log("tenant", t.Id, "create", $"Tenant {t.Party!.PartyCode} created", null, t.BranchId);
         await Db.SaveChangesAsync();
         await tx.CommitAsync();
-        return CreatedAtAction(nameof(Get), new { id = t.Id }, new { t.Id, code = t.TenantCode, contractId });
+        return CreatedAtAction(nameof(Get), new { id = t.Id }, new { t.Id, code = t.Party!.PartyCode, contractId });
     }
 
     [HttpPut("{id:long}")]
@@ -159,9 +204,9 @@ public class TenantsController : ApiControllerBase
     {
         var t = await Db.Tenants.FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Tenant", id);
         EnsureBranchAccess(t.BranchId);
-        if (input.Phone != null) t.Phone = input.Phone.Trim();
-        if (input.Email != null) t.Email = input.Email.Trim();
-        if (input.Address != null) t.Address = input.Address;
+        if (input.Phone != null) t.Party!.Phone = input.Phone.Trim();
+        if (input.Email != null) t.Party!.Email = input.Email.Trim();
+        if (input.Address != null) t.Party!.Address = input.Address;
         await Db.SaveChangesAsync();
         return NoContent();
     }
@@ -199,7 +244,7 @@ public class TenantsController : ApiControllerBase
             running += l.Debit - l.Credit;
             return new { l.Date, l.Type, l.Id, reference = l.Ref, description = Label(l.InvoiceTypeId), l.Debit, l.Credit, balance = running, l.DueDate };
         }).ToList();
-        return Ok(new { tenantId = id, tenant = Loc(t.NameEn, t.NameAr), from, to, opening, closing = running,
+        return Ok(new { tenantId = id, tenant = Loc(t.Party!.NameEn, t.Party!.NameAr), from, to, opening, closing = running,
                         totalDebit = rows.Sum(r => r.Debit), totalCredit = rows.Sum(r => r.Credit), lines = rows });
     }
 
@@ -223,20 +268,24 @@ public class TenantsController : ApiControllerBase
         public string? MeterNo { get; init; }
     }
 
+    private PartyService Parties => HttpContext.RequestServices.GetRequiredService<PartyService>();
+
     private async Task Apply(Tenant t, TenantInput i)
     {
-        t.NameAr = i.NameAr?.Trim(); t.NameEn = i.NameEn?.Trim();
-        t.Email = i.Email?.Trim(); t.Phone = i.Phone?.Trim();
-        t.EmiratesId = string.IsNullOrWhiteSpace(i.EmiratesId) ? null : i.EmiratesId.Trim();
-        t.NationalityId = await Lk(LookupTypes.Nationality, i.NationalityId, i.Nationality, field: "nationality");
-        t.DateOfBirth = i.Dob; t.CityId = i.CityId; t.Address = i.Address;
+        await Parties.ApplyAsync(t.Party!, new PartyService.PartyInput
+        {
+            NameAr = i.NameAr, NameEn = i.NameEn, Email = i.Email, Phone = i.Phone, EmiratesId = i.EmiratesId,
+            NationalityId = await Lk(LookupTypes.Nationality, i.NationalityId, i.Nationality, field: "nationality"),
+            DateOfBirth = i.Dob, CityId = i.CityId, Address = i.Address,
+        }, onlyGiven: false);
     }
 
+    /// <summary>One customer per person: the Emirates ID may belong to an owner / supplier / employee, but not to another customer.</summary>
     private async Task CheckEmiratesId(string? eid, long? exceptId)
     {
         if (string.IsNullOrWhiteSpace(eid)) return;
-        if (await Db.Tenants.AnyAsync(t => t.EmiratesId == eid.Trim() && t.Id != exceptId))
-            throw new BusinessRuleException($"A tenant with Emirates ID {eid} already exists.");
+        var code = await Db.Tenants.Where(t => t.Party!.EmiratesId == eid.Trim() && t.Id != exceptId).Select(t => t.Party!.PartyCode).FirstOrDefaultAsync();
+        if (code != null) throw new BusinessRuleException($"A customer with Emirates ID {eid} already exists ({code}).");
     }
 
     internal static string Initials(string? name)

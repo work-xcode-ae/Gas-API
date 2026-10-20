@@ -59,12 +59,12 @@ public class MeterServicesController : ApiControllerBase
         var type = input.ServiceType.ToLowerInvariant();
         if (type == "replace" && input.NewMeterId == null && input.CompleteNow) throw new AppException("newMeterId is required to replace a meter.");
         var unitId = await Db.MeterAssignments.Where(a => a.MeterId == meter.Id && a.ToDate == null).Select(a => (long?)a.UnitId).FirstOrDefaultAsync();
-        var contract = await Db.SupplyContracts.Where(c => c.IsActive && (c.MeterId == meter.Id || (unitId != null && c.UnitId == unitId))).FirstOrDefaultAsync();
+        var contract = unitId == null ? null : await Db.SupplyContracts.Where(c => c.IsActive && c.UnitId == unitId).FirstOrDefaultAsync();
 
         await using var tx = await Db.Database.BeginTransactionAsync();
         var s = new MeterService
         {
-            BranchId = meter.BranchId, ServiceNo = await Numbers.NextAsync(NumberPrefixes.MeterService), MeterId = meter.Id, ContractId = contract?.Id,
+            BranchId = meter.BranchId ?? 0, ServiceNo = await Numbers.NextAsync(NumberPrefixes.MeterService), MeterId = meter.Id, ContractId = contract?.Id,
             ServiceTypeId = typeId, IssueTypeId = await Lk(LookupTypes.MeterIssueType, null, input.IssueType, field: "issueType"),
             PriorityId = await Lk(LookupTypes.Priority, null, input.Priority ?? "medium", field: "priority"), Reason = input.Reason,
             RequestedDate = input.RequestedDate ?? Today, BeforeReading = input.BeforeReading, NewMeterId = input.NewMeterId,
@@ -145,13 +145,19 @@ public class MeterServicesController : ApiControllerBase
                 var newMeter = await Db.Meters.FirstOrDefaultAsync(m => m.Id == s.NewMeterId) ?? throw new NotFoundException("Meter", s.NewMeterId);
                 var assignment = await Db.MeterAssignments.FirstOrDefaultAsync(a => a.MeterId == meter.Id && a.ToDate == null)
                                  ?? throw new BusinessRuleException("The old meter is not assigned to a unit.");
-                if (s.BeforeReading != null) await Ops.AddReadingAsync(meter, s.BeforeReading.Value, when, "manual", $"Final reading – replaced ({s.ServiceNo})");
+                if (s.BeforeReading == null) throw new AppException("The final reading of the old meter is required.");
+                if (s.AfterReading == null) throw new AppException("The initial reading of the new meter is required.");
+                // 1) final reading of the old meter, 2) close its assignment, 3) install the new meter, 4) its initial reading.
+                // Both readings are linked to the unit and its active tenancy, so the tenancy keeps consumption from both meters.
+                await Ops.AddReadingAsync(meter, s.BeforeReading.Value, when, "manual", $"Final reading – meter replaced ({s.ServiceNo})",
+                    type: "replacement_out", unitId: assignment.UnitId);
                 assignment.ToDate = date;
                 await Ops.SetStatusAsync(meter, "maintenance");
                 await Db.SaveChangesAsync();
-                if (s.AfterReading != null) newMeter.InitialReading = s.AfterReading;
-                await Ops.AssignAsync(newMeter, assignment.UnitId, date, linkContract: false);
-                await Db.SupplyContracts.Where(c => c.IsActive && (c.MeterId == meter.Id || c.UnitId == assignment.UnitId)).ForEachAsync(c => c.MeterId = newMeter.Id);
+                newMeter.InitialReading ??= s.AfterReading;
+                await Ops.AssignAsync(newMeter, assignment.UnitId, date);
+                await Ops.AddReadingAsync(newMeter, s.AfterReading.Value, when.AddSeconds(1), "manual", $"Initial reading – installed ({s.ServiceNo})",
+                    type: "replacement_in", unitId: assignment.UnitId);
                 await Ops.SetStatusAsync(newMeter, "active");
                 break;
             }
@@ -160,14 +166,16 @@ public class MeterServicesController : ApiControllerBase
                 break;
         }
 
-        if ((input.FeeAmount ?? 0) > 0)
+        // the contract's disconnection fee is already on the first invoice — only an explicit fee is billed here
+        var feeAmount = input.FeeAmount;
+        if ((feeAmount ?? 0) > 0)
         {
             var contract = s.ContractId == null ? null : await Db.SupplyContracts.Include(c => c.Unit).FirstOrDefaultAsync(c => c.Id == s.ContractId);
             if (contract == null) throw new BusinessRuleException("A service fee needs an active supply contract to bill.");
             var feeType = type switch { "connect" => "connection", "disconnect" => "disconnection", "replace" => "maintenance", _ => "maintenance" };
             var inv = await HttpContext.RequestServices.GetRequiredService<BillingService>().CreateInvoiceAsync(new InvoiceDraft(
                 contract.BranchId, contract.TenantId, contract.Unit!.BuildingId, contract.Id, type is "connect" ? "connection" : "maintenance", null, date, null, null, null, null,
-                $"Meter service {s.ServiceNo}", new[] { new InvoiceLineInput(feeType, null, $"Meter {type} – {s.ServiceNo}", 1, "each", input.FeeAmount!.Value, null) }, true));
+                $"Meter service {s.ServiceNo}", new[] { new InvoiceLineInput(feeType, null, $"Meter {type} – {s.ServiceNo}", 1, "each", feeAmount!.Value, null) }, true));
             s.FeeInvoiceItemId = await Db.InvoiceItems.Where(i => i.InvoiceId == inv.Id).Select(i => (long?)i.Id).FirstOrDefaultAsync();
         }
 

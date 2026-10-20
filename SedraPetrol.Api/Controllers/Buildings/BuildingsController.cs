@@ -20,7 +20,8 @@ public class BuildingsController : ApiControllerBase
     public record OwnerInput(long? PartyId, NewPartyInput? Party, decimal? OwnershipPercentage, bool IsPrimary, DateOnly? FromDate, DateOnly? ToDate);
 
     public record NewPartyInput(string? PartyType, string? NameEn, string? NameAr, string? EmiratesId, string? Nationality, string? TradeLicenseNo,
-        string? TaxNumber, long? CityId, string? PoBox, string? Address, string? Phone, string? Mobile, string? Email, string? BankName, string? Iban);
+        string? TaxNumber, long? CityId, string? PoBox, string? Address, string? Phone, string? Mobile, string? Email, string? BankName, string? Iban,
+        List<string>? Phones = null, List<string>? Emails = null);
 
     public record TankInput(string? TankNo, long? GasTypeId, string? GasType, decimal CapacityLitres, decimal? CurrentLevelLitres, string? SerialNo,
         string? Manufacturer, DateOnly? InstallDate, DateOnly? LastInspectionDate, DateOnly? NextInspectionDate, string? Status);
@@ -153,7 +154,8 @@ public class BuildingsController : ApiControllerBase
             b.Id, b.Code, name = Loc(b.NameEn, b.NameAr), b.NameEn, b.NameAr, b.BranchId, branch = Loc(b.Branch?.NameEn, b.Branch?.NameAr),
             b.CityId, city = Loc(b.City?.NameEn, b.City?.NameAr), b.BuildingTypeId, type = Code(b.BuildingTypeId), typeLabel = Label(b.BuildingTypeId),
             b.StatusId, status = Code(b.StatusId) ?? (b.IsActive ? "active" : "inactive"), statusLabel = Label(b.StatusId),
-            b.Zone, b.Street, b.PoBox, b.Address, b.Latitude, b.Longitude, b.TotalFloors, b.Notes, b.IsActive, b.CreatedAt,
+            b.Zone, b.Street, b.PoBox, b.Address, b.Latitude, b.Longitude, b.TotalFloors, b.Notes, b.IsActive, b.CreatedAt, b.UpdatedAt,
+            emirate = b.City == null ? null : await Db.Emirates.AsNoTracking().Where(e => e.Id == b.City.EmirateId).Select(e => e.NameAr ?? e.NameEn).FirstOrDefaultAsync(ct),
             owners = owners.Select(o => new { o.Id, o.PartyId, name = Loc(o.NameEn, o.NameAr), o.NameEn, o.NameAr, partyType = Code(o.PartyTypeId),
                                               o.EmiratesId, o.TradeLicenseNo, o.Phone, o.Email, o.OwnershipPercentage, o.IsPrimary, o.FromDate, o.ToDate }),
             tanks = tanks.Select(t => TanksController.ToDto(t, Code, Label, Loc)),
@@ -226,6 +228,350 @@ public class BuildingsController : ApiControllerBase
         return CreatedAtAction(nameof(Get), new { id = b.Id }, new { b.Id, b.Code });
     }
 
+    // ------------------------------------------------------------------ tank insights (refills vs tenant meter usage)
+
+    /// <summary>
+    /// Does the building need a refill?
+    /// <list type="bullet">
+    /// <item><b>Gas now</b> = last tank record (level reading or refill, measured) − tenant meter usage after it.
+    /// Meter usage is split by days (a reading covers the days since that meter's previous reading, so only the part after the
+    /// record counts); days after the last meter reading are estimated with the daily rate.</item>
+    /// <item><b>Daily rate</b> = the last complete refill period of the tanks (level after the previous refill − level before the next one,
+    /// both measured by the driver); falls back to the last 30 days of meter readings.</item>
+    /// <item><b>Refill periods</b>: for each period, what left the tank vs what the meters recorded for the same days (loss check).</item>
+    /// </list>
+    /// Meters are in m³, tanks in litres: converted with the tanks' gas type (litre_to_m3).
+    /// </summary>
+    [HttpGet("{id:long}/tank-insights")]
+    public async Task<IActionResult> TankInsights(long id, CancellationToken ct = default)
+    {
+        var b = await Scoped(Db.Buildings.AsNoTracking()).FirstOrDefaultAsync(x => x.Id == id, ct) ?? throw new NotFoundException("Building", id);
+        var now = DateTimeOffset.UtcNow;
+
+        var tanks = await Db.Tanks.AsNoTracking().Where(t => t.BuildingId == id && t.IsActive).Include(t => t.GasType).OrderBy(t => t.TankNo).ToListAsync(ct);
+        var tankIds = tanks.Select(t => t.Id).ToList();
+        var capacity = tanks.Sum(t => t.CapacityLitres);
+        decimal ShareOf(long tankId) => capacity > 0 ? (tanks.FirstOrDefault(t => t.Id == tankId)?.CapacityLitres ?? 0) / capacity : 0m;
+        // m³ → litres with the tanks' gas type (capacity-weighted when tanks hold different gases)
+        var factor = capacity > 0 ? tanks.Sum(t => (t.GasType?.LitreToM3 ?? 0) * t.CapacityLitres) / capacity : 0m;
+        decimal ToLitres(decimal m3) => factor > 0 ? m3 / factor : 0m;
+
+        var refills = await Db.TankRefills.AsNoTracking().Where(r => tankIds.Contains(r.TankId)).OrderBy(r => r.RefillDatetime)
+            .Select(r => new { r.TankId, r.RefillDatetime, r.LevelBeforeLitres, r.LevelAfterLitres,
+                               Qty = r.DeliveredQtyLitres ?? ((r.LevelAfterLitres ?? 0) - (r.LevelBeforeLitres ?? 0)) })
+            .ToListAsync(ct);
+        var cancelled = await Lookups.IdOrNullAsync(LookupTypes.RefillStatus, "cancelled");
+        var openRequests = await Db.RefillRequests.AsNoTracking()
+            .Where(r => tankIds.Contains(r.TankId) && r.CompletedAt == null && r.StatusId != cancelled)
+            .Select(r => new { r.TankId, r.RequestNo, r.RequestedQtyLitres }).ToListAsync(ct);
+        var levelRows = await Db.TankLevelHistories.AsNoTracking().Where(h => tankIds.Contains(h.TankId))
+            .OrderBy(h => h.TankId).ThenBy(h => h.EventDate).ThenBy(h => h.Id)
+            .Select(h => new { h.Id, h.TankId, h.EventDate, h.LevelLitres }).ToListAsync(ct);
+
+        // ── tenant meter readings of this building (old readings without a unit → by meter assignment) ──
+        var readings = Db.MeterReadings.AsNoTracking().Where(r =>
+            (r.UnitId != null && r.Unit!.BuildingId == id) ||
+            (r.UnitId == null && Db.MeterAssignments.Any(a => a.MeterId == r.MeterId && a.Unit!.BuildingId == id)));
+        var monthlyUse = await readings.Where(r => r.Consumption != null && r.Consumption > 0)
+            .GroupBy(r => new { r.ReadingDate.Year, r.ReadingDate.Month })
+            .Select(g => new { g.Key.Year, g.Key.Month, M3 = g.Sum(r => r.Consumption ?? 0) }).ToListAsync(ct);
+        var firstReading = await readings.Where(r => r.Consumption != null && r.Consumption > 0).MinAsync(r => (DateTimeOffset?)r.ReadingDate, ct);
+        var horizon = now.AddDays(-550);
+        var rd = await readings.Where(r => r.ReadingDate >= horizon).OrderBy(r => r.MeterId).ThenBy(r => r.ReadingDate).ThenBy(r => r.Id)
+            .Select(r => new { r.MeterId, r.ReadingDate, r.Consumption }).ToListAsync(ct);
+
+        // each reading covers (previous reading of the same meter, this reading]
+        var intervals = new List<(DateTimeOffset From, DateTimeOffset To, decimal M3)>();
+        foreach (var mg in rd.GroupBy(r => r.MeterId))
+        {
+            DateTimeOffset? prevAt = null;
+            foreach (var r in mg)
+            {
+                if (prevAt != null && (r.Consumption ?? 0) > 0 && r.ReadingDate > prevAt.Value) intervals.Add((prevAt.Value, r.ReadingDate, r.Consumption!.Value));
+                prevAt = r.ReadingDate;
+            }
+        }
+        DateTimeOffset? metersReadUntil = rd.Count > 0 ? rd.Max(r => r.ReadingDate) : null;
+        // meter usage (m³) between two moments, each reading split by days
+        decimal MeterM3(DateTimeOffset from, DateTimeOffset to) => intervals.Sum(iv =>
+        {
+            var s0 = iv.From > from ? iv.From : from;
+            var e0 = iv.To < to ? iv.To : to;
+            return e0 <= s0 ? 0m : iv.M3 * (decimal)((e0 - s0).TotalSeconds / (iv.To - iv.From).TotalSeconds);
+        });
+
+        // ── daily rate from the meters: last 30 days that have readings ──
+        decimal? meterRateM3 = null, meterRateL = null;
+        if (metersReadUntil != null && intervals.Count > 0 && factor > 0)
+        {
+            var winEnd = metersReadUntil.Value;
+            var winStart = winEnd.AddDays(-30);
+            var earliest = intervals.Min(iv => iv.From);
+            if (winStart < earliest) winStart = earliest;
+            var winDays = (decimal)(winEnd - winStart).TotalDays;
+            if (winDays >= 7) { meterRateM3 = MeterM3(winStart, winEnd) / winDays; meterRateL = ToLitres(meterRateM3.Value); }
+        }
+
+        // ── refill periods (per tank): measured usage between two refills vs the meters for the same days ──
+        var periods = new List<(long TankId, DateTimeOffset From, DateTimeOffset To, decimal Days, decimal TankUsed, decimal MeterUsed, bool MetersComplete)>();
+        foreach (var tg in refills.GroupBy(r => r.TankId))
+        {
+            var list = tg.OrderBy(r => r.RefillDatetime).ToList();
+            for (var i = 1; i < list.Count; i++)
+            {
+                var p = list[i - 1];
+                var c = list[i];
+                if (p.LevelAfterLitres == null || c.LevelBeforeLitres == null) continue;
+                var used = p.LevelAfterLitres.Value - c.LevelBeforeLitres.Value;
+                var days = (decimal)(c.RefillDatetime - p.RefillDatetime).TotalDays;
+                if (days < 1 || used < 0) continue;
+                periods.Add((tg.Key, p.RefillDatetime, c.RefillDatetime, days, used,
+                    ToLitres(MeterM3(p.RefillDatetime, c.RefillDatetime)) * ShareOf(tg.Key),
+                    metersReadUntil != null && metersReadUntil.Value >= c.RefillDatetime));
+            }
+        }
+        // building rate from each tank's latest period (last 6 months), scaled when only some tanks have one
+        decimal? tankRateL = null;
+        var latestByTank = periods.GroupBy(x => x.TankId).Select(g => g.OrderByDescending(x => x.To).First()).Where(x => x.To >= now.AddDays(-180)).ToList();
+        if (latestByTank.Count > 0)
+        {
+            var covered = latestByTank.Sum(x => ShareOf(x.TankId));
+            if (covered > 0) tankRateL = latestByTank.Sum(x => x.TankUsed / x.Days) / covered;
+        }
+        var rate = tankRateL ?? meterRateL;
+        var rateSource = tankRateL != null ? "refill_period" : meterRateL != null ? "meters" : null;
+
+        // ── gas now, per tank: last record − meter usage after it (split by days) − estimate after the last meter reading ──
+        var tankNow = new List<(long Id, decimal Recorded, DateTimeOffset? RecordedAt, decimal Measured, decimal Estimated, decimal Now)>();
+        foreach (var t in tanks)
+        {
+            var anchor = levelRows.Where(h => h.TankId == t.Id).OrderByDescending(h => h.EventDate).ThenByDescending(h => h.Id).FirstOrDefault();
+            var recorded = anchor?.LevelLitres ?? (t.CurrentLevelLitres ?? 0);
+            DateTimeOffset? at = anchor?.EventDate;
+            decimal measured = 0, estimated = 0;
+            if (at != null)
+            {
+                var measuredEnd = metersReadUntil != null && metersReadUntil.Value > at.Value ? metersReadUntil.Value : at.Value;
+                if (measuredEnd > now) measuredEnd = now;
+                measured = ToLitres(MeterM3(at.Value, measuredEnd)) * ShareOf(t.Id);
+                var estDays = (decimal)(now - measuredEnd).TotalDays;
+                if (rate != null && estDays > 0) estimated = rate.Value * ShareOf(t.Id) * estDays;
+            }
+            tankNow.Add((t.Id, recorded, at, measured, estimated, Math.Max(0, recorded - measured - estimated)));
+        }
+        var recordedTotal = tankNow.Sum(x => x.Recorded);
+        var level = tankNow.Sum(x => x.Now);
+        var pct = capacity > 0 ? level * 100 / capacity : 0m;
+        var lowLine = capacity * TankRules.LowLevelPercent / 100m;
+        decimal? daysToLow = rate is > 0 ? Math.Max(0, (level - lowLine) / rate.Value) : null;
+        decimal? daysToEmpty = rate is > 0 ? level / rate.Value : null;
+        var status = tanks.Count == 0 ? "no_tanks"
+            : pct < TankRules.LowLevelPercent ? "refill_now"
+            : daysToLow == null ? "unknown"
+            : daysToLow <= 7 ? "refill_soon"
+            : "ok";
+
+        // ── what physically left the tanks between level records (refills raise the level and are skipped) ──
+        var drops = new List<(DateTimeOffset At, decimal Litres)>();
+        foreach (var hg in levelRows.GroupBy(h => h.TankId))
+        {
+            decimal? prevLevel = null;
+            foreach (var h in hg)
+            {
+                if (prevLevel != null && h.LevelLitres < prevLevel.Value) drops.Add((h.EventDate, prevLevel.Value - h.LevelLitres));
+                prevLevel = h.LevelLitres;
+            }
+        }
+
+        // ── month by month since the building started (first of: creation, first refill, first reading) ──
+        var firstRefill = refills.Count > 0 ? refills.Min(r => r.RefillDatetime) : (DateTimeOffset?)null;
+        var origin = new[] { (DateTimeOffset?)b.CreatedAt, firstRefill, firstReading }.Where(x => x != null && x.Value.Year > 2000).Min() ?? now;
+        var months = new List<object>();
+        var cursor = new DateTime(origin.Year, origin.Month, 1);
+        var lastMonth = new DateTime(now.Year, now.Month, 1);
+        while (cursor <= lastMonth && months.Count < 240)
+        {
+            var mr = refills.Where(r => r.RefillDatetime.Year == cursor.Year && r.RefillDatetime.Month == cursor.Month).ToList();
+            var m3 = monthlyUse.Where(x => x.Year == cursor.Year && x.Month == cursor.Month).Sum(x => x.M3);
+            var tankL = drops.Where(x => x.At.Year == cursor.Year && x.At.Month == cursor.Month).Sum(x => x.Litres);
+            var meterL = ToLitres(m3);
+            months.Add(new
+            {
+                month = cursor.ToString("yyyy-MM"), refills = mr.Count, deliveredLitres = Math.Round(mr.Sum(r => r.Qty), 1),
+                consumptionM3 = Math.Round(m3, 2), consumptionLitres = Math.Round(meterL, 1),
+                tankDropLitres = Math.Round(tankL, 1),
+                differenceLitres = tankL > 0 ? Math.Round(tankL - meterL, 1) : (decimal?)null,
+                differencePct = tankL > 0 ? Math.Round((tankL - meterL) * 100 / tankL, 1) : (decimal?)null,
+            });
+            cursor = cursor.AddMonths(1);
+        }
+        var totalM3 = monthlyUse.Sum(x => x.M3);
+        var totalDrop = drops.Sum(x => x.Litres);
+        decimal? R1(decimal? v) => v == null ? null : Math.Round(v.Value, 1);
+
+        return Ok(new
+        {
+            buildingId = id, since = origin, litreToM3 = Math.Round(factor, 4), lowLevelPercent = TankRules.LowLevelPercent,
+            capacityLitres = capacity,
+            // measured at the last tank record → estimated now
+            recordedLevelLitres = Math.Round(recordedTotal, 1),
+            recordedAt = tankNow.Where(x => x.RecordedAt != null).Select(x => x.RecordedAt).Min(),
+            usedSinceRecordMeasuredLitres = Math.Round(tankNow.Sum(x => x.Measured), 1),
+            usedSinceRecordEstimatedLitres = Math.Round(tankNow.Sum(x => x.Estimated), 1),
+            levelLitres = Math.Round(level, 1), levelPct = Math.Round(pct, 1), refillToFullLitres = Math.Round(capacity - level, 1),
+            metersReadUntil,
+            // daily rate
+            dailyUsageLitres = R1(rate), rateSource,
+            refillPeriodRateLitres = R1(tankRateL), meterRateLitres = R1(meterRateL),
+            meterRateM3 = meterRateM3 == null ? (decimal?)null : Math.Round(meterRateM3.Value, 2),
+            daysToLow = R1(daysToLow), daysToEmpty = R1(daysToEmpty),
+            expectedLowDate = daysToLow == null ? (DateTimeOffset?)null : now.AddDays((double)daysToLow.Value),
+            status,
+            totals = new
+            {
+                refills = refills.Count, deliveredLitres = Math.Round(refills.Sum(r => r.Qty), 1),
+                consumptionM3 = Math.Round(totalM3, 2), consumptionLitres = Math.Round(ToLitres(totalM3), 1),
+                months = months.Count, avgRefillsPerMonth = months.Count > 0 ? Math.Round((decimal)refills.Count / months.Count, 2) : 0,
+                lastRefill = refills.Count > 0 ? refills.Max(r => r.RefillDatetime) : (DateTimeOffset?)null,
+                tankDropLitres = Math.Round(totalDrop, 1),
+                differenceLitres = totalDrop > 0 ? Math.Round(totalDrop - ToLitres(totalM3), 1) : (decimal?)null,
+                differencePct = totalDrop > 0 ? Math.Round((totalDrop - ToLitres(totalM3)) * 100 / totalDrop, 1) : (decimal?)null,
+            },
+            refillPeriods = periods.OrderByDescending(x => x.To).Take(12).Select(x => new
+            {
+                tankId = x.TankId, tankNo = tanks.First(t => t.Id == x.TankId).TankNo, from = x.From, to = x.To, days = Math.Round(x.Days, 1),
+                tankUsedLitres = Math.Round(x.TankUsed, 1), dailyLitres = Math.Round(x.TankUsed / x.Days, 1),
+                meterLitres = x.MetersComplete ? Math.Round(x.MeterUsed, 1) : (decimal?)null,
+                differenceLitres = x.MetersComplete ? Math.Round(x.TankUsed - x.MeterUsed, 1) : (decimal?)null,
+                differencePct = x.MetersComplete && x.TankUsed > 0 ? Math.Round((x.TankUsed - x.MeterUsed) * 100 / x.TankUsed, 1) : (decimal?)null,
+                metersComplete = x.MetersComplete,
+            }),
+            tanks = tanks.Select(t =>
+            {
+                var n = tankNow.First(x => x.Id == t.Id);
+                return new
+                {
+                    t.Id, t.TankNo, t.CapacityLitres,
+                    recordedLevelLitres = Math.Round(n.Recorded, 1), recordedAt = n.RecordedAt,
+                    levelLitres = Math.Round(n.Now, 1), levelPct = t.CapacityLitres > 0 ? Math.Round(n.Now * 100 / t.CapacityLitres, 1) : 0,
+                    refills = refills.Count(r => r.TankId == t.Id),
+                    deliveredLitres = Math.Round(refills.Where(r => r.TankId == t.Id).Sum(r => r.Qty), 1),
+                    lastRefill = refills.Where(r => r.TankId == t.Id).Select(r => (DateTimeOffset?)r.RefillDatetime).Max(),
+                    openRequest = openRequests.Where(r => r.TankId == t.Id).Select(r => r.RequestNo).FirstOrDefault(),
+                };
+            }),
+            openRequests = openRequests.Select(r => new { r.TankId, r.RequestNo, r.RequestedQtyLitres }),
+            months,
+        });
+    }
+
+    // ------------------------------------------------------------------ tanks (added / edited from the building page)
+
+    public record BuildingTankInput(string? TankNo, long? GasTypeId, string? GasType, decimal CapacityLitres, decimal? CurrentLevelLitres,
+        string? SerialNo, string? Manufacturer, DateOnly? InstallDate, DateOnly? LastInspectionDate, DateOnly? NextInspectionDate, string? Status);
+
+    /// <summary>Active gas types for the tank form (needs only buildings.view).</summary>
+    [HttpGet("gas-types")]
+    public async Task<IActionResult> GasTypeOptions()
+    {
+        var rows = await Db.GasTypes.AsNoTracking().Where(g => g.IsActive).OrderBy(g => g.Code).Select(g => new { g.Id, g.Code, g.NameEn, g.NameAr }).ToListAsync();
+        return Ok(rows.Select(g => new { g.Id, g.Code, name = Loc(g.NameEn, g.NameAr) ?? g.Code }));
+    }
+
+    /// <summary>Add a gas tank to the building (buildings.manage — same as adding units).</summary>
+    [HttpPost("{id:long}/tanks")]
+    public async Task<IActionResult> AddTank(long id, [FromBody] BuildingTankInput input)
+    {
+        var b = await Scoped(Db.Buildings).FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Building", id);
+        EnsureBranchAccess(b.BranchId);
+        var t = await TanksController.CreateTank(Db, Lookups, b, input.TankNo, input.GasTypeId, input.GasType, input.CapacityLitres, input.CurrentLevelLitres,
+            input.SerialNo, input.Manufacturer, input.InstallDate, input.LastInspectionDate, input.NextInspectionDate, input.Status);
+        Activity.Log("tank", t.Id, "create", $"Tank {t.TankNo} added", b.Id, b.BranchId);
+        await Db.SaveChangesAsync();
+        return Ok(new { t.Id, t.TankNo });
+    }
+
+    /// <summary>
+    /// People who can take a tank reading: active system users (staff) and drivers — buildings.view.
+    /// (There is no employee register yet; switch to it when it exists.)
+    /// </summary>
+    [HttpGet("staff-options")]
+    public async Task<IActionResult> StaffOptions()
+    {
+        // employees from the employee register when it has any, otherwise the system users
+        var staff = await Db.Employees.AsNoTracking().Where(e => e.IsActive)
+            .Select(e => new { e.Id, e.Party!.NameAr, e.Party!.NameEn, Email = e.Party!.Email ?? e.EmployeeNo, e.Party!.Phone }).ToListAsync();
+        var users = staff.Count > 0 ? staff : await Db.AppUsers.AsNoTracking().Where(u => u.IsActive)
+            .Select(u => new { u.Id, u.NameAr, u.NameEn, Email = (string?)u.Email, u.Phone }).ToListAsync();
+        var drivers = await Db.Drivers.AsNoTracking().Where(d => d.IsActive)
+            .Select(d => new { d.Id, d.Party!.NameAr, d.Party!.NameEn, d.Party!.Phone }).ToListAsync();
+        return Ok(new
+        {
+            employees = users.Select(u => new { u.Id, name = Loc(u.NameEn, u.NameAr) ?? u.Email, u.Phone }).OrderBy(x => x.name),
+            drivers = drivers.Select(d => new { d.Id, name = Loc(d.NameEn, d.NameAr) ?? $"Driver {d.Id}", d.Phone }).OrderBy(x => x.name),
+        });
+    }
+
+    /// <summary>Level history of a building tank (newest first) — needs only buildings.view.</summary>
+    [HttpGet("{id:long}/tanks/{tankId:long}/levels")]
+    public async Task<IActionResult> TankLevels(long id, long tankId, [FromQuery] int take = 50)
+    {
+        await LoadLookups();
+        var t = await Db.Tanks.AsNoTracking().FirstOrDefaultAsync(x => x.Id == tankId && x.BuildingId == id) ?? throw new NotFoundException("Tank", tankId);
+        EnsureBranchAccess(t.BranchId);
+        var rows = await Db.TankLevelHistories.AsNoTracking().Where(h => h.TankId == tankId)
+            .OrderByDescending(h => h.EventDate).ThenByDescending(h => h.Id).Take(Math.Clamp(take, 1, 500))
+            .Select(h => new
+            {
+                h.Id, h.EventDate, h.EventTypeId, h.LevelLitres, h.Notes, h.ReadBy, h.TankRefillId,
+                EnteredBy = Db.AppUsers.Where(u => u.Id == h.CreatedBy).Select(u => u.NameAr ?? u.NameEn ?? u.Email).FirstOrDefault(),
+            }).ToListAsync();
+        return Ok(rows.Select(h => new
+        {
+            h.Id, h.EventDate, eventType = Code(h.EventTypeId), eventTypeLabel = Label(h.EventTypeId), h.LevelLitres,
+            levelPct = t.CapacityLitres > 0 ? Math.Round(h.LevelLitres / t.CapacityLitres * 100, 1) : 0,
+            h.Notes, readBy = h.ReadBy, enteredBy = h.EnteredBy, h.TankRefillId,
+        }));
+    }
+
+    /// <summary>Record a level reading of a building tank (date &amp; time, who read it, remarks) — buildings.manage.</summary>
+    [HttpPost("{id:long}/tanks/{tankId:long}/levels")]
+    public async Task<IActionResult> AddTankLevel(long id, long tankId, [FromBody] TanksController.LevelInput input)
+    {
+        var t = await Db.Tanks.FirstOrDefaultAsync(x => x.Id == tankId && x.BuildingId == id) ?? throw new NotFoundException("Tank", tankId);
+        EnsureBranchAccess(t.BranchId);
+        if (input.EventType == "refill") throw new AppException("Refills are recorded through the refill workflow.");
+        await TanksController.RecordLevel(Db, Lookups, t, input.LevelLitres, input.EventType ?? "manual_reading", input.EventDate ?? DateTimeOffset.UtcNow,
+            input.Notes, null, input.ReadBy);
+        Activity.Log("tank", t.Id, "level", $"Tank {t.TankNo} level {input.LevelLitres:0.##} L", id, t.BranchId);
+        await Db.SaveChangesAsync();
+        return Ok(new { t.Id, t.CurrentLevelLitres });
+    }
+
+    /// <summary>Edit a tank of the building. The level itself changes through readings / refills.</summary>
+    [HttpPut("{id:long}/tanks/{tankId:long}")]
+    public async Task<IActionResult> UpdateTank(long id, long tankId, [FromBody] BuildingTankInput input)
+    {
+        var t = await Db.Tanks.FirstOrDefaultAsync(x => x.Id == tankId && x.BuildingId == id) ?? throw new NotFoundException("Tank", tankId);
+        EnsureBranchAccess(t.BranchId);
+        if (input.CapacityLitres <= 0) throw new AppException("Capacity must be greater than zero.");
+        if ((t.CurrentLevelLitres ?? 0) > input.CapacityLitres) throw new AppException("Capacity cannot be less than the current level.");
+        if (!string.IsNullOrWhiteSpace(input.TankNo))
+        {
+            var no = input.TankNo.Trim();
+            if (no != t.TankNo && await Db.Tanks.AnyAsync(x => x.BuildingId == id && x.TankNo == no)) throw new BusinessRuleException($"Tank {no} already exists in this building.");
+            t.TankNo = no;
+        }
+        t.GasTypeId = await TanksController.ResolveGasType(Db, input.GasTypeId, input.GasType) ?? t.GasTypeId;
+        t.CapacityLitres = input.CapacityLitres;
+        t.SerialNo = input.SerialNo; t.Manufacturer = input.Manufacturer; t.InstallDate = input.InstallDate;
+        t.LastInspectionDate = input.LastInspectionDate; t.NextInspectionDate = input.NextInspectionDate;
+        if (input.Status != null) t.StatusId = await Lk(LookupTypes.TankStatus, null, input.Status, field: "status");
+        Activity.Log("tank", t.Id, "update", $"Tank {t.TankNo} updated", id, t.BranchId);
+        await Db.SaveChangesAsync();
+        return NoContent();
+    }
+
     /// <summary>Update building details (owners, tanks and units have their own endpoints).</summary>
     [HttpPut("{id:long}")]
     public async Task<IActionResult> Update(long id, [FromBody] BuildingInput input)
@@ -257,6 +603,16 @@ public class BuildingsController : ApiControllerBase
         var b = await Scoped(Db.Buildings).FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Building", id);
         if (await Db.SupplyContracts.AnyAsync(c => c.IsActive && Db.Units.Any(u => u.Id == c.UnitId && u.BuildingId == id)))
             throw new BusinessRuleException("The building has active supply contracts. Terminate them first.");
+        if (await Db.AmcContracts.AnyAsync(a => a.IsActive && a.BuildingId == id))
+            throw new BusinessRuleException("The building has an active maintenance (AMC) contract. Terminate it first.");
+        var openInvoice = await Lookups.IdOrNullAsync(LookupTypes.InvoiceStatus, "pending");
+        var partial = await Lookups.IdOrNullAsync(LookupTypes.InvoiceStatus, "partial");
+        var overdue = await Lookups.IdOrNullAsync(LookupTypes.InvoiceStatus, "overdue");
+        if (await Db.Invoices.AnyAsync(i => i.BuildingId == id && (i.StatusId == openInvoice || i.StatusId == partial || i.StatusId == overdue)))
+            throw new BusinessRuleException("The building has unpaid invoices. Collect or cancel them first.");
+        var openSr = await OpenSrStatusIds();
+        if (await Db.ServiceRequests.AnyAsync(s => s.BuildingId == id && s.StatusId != null && openSr.Contains(s.StatusId.Value)))
+            throw new BusinessRuleException("The building has open service requests. Close them first.");
         Db.Buildings.Remove(b);
         Activity.Log("building", b.Id, "delete", $"Building {b.Code} deleted", b.Id, b.BranchId);
         await Db.SaveChangesAsync();
@@ -355,13 +711,14 @@ public class BuildingsController : ApiControllerBase
         }
         else if (o.Party != null)
         {
-            partyId = (await PartiesController.CreateParty(Db, Lookups, branchId, o.Party)).Id;
+            partyId = (await PartiesController.CreateParty(Db, Lookups, Numbers, branchId, o.Party)).Id;
         }
         else throw new AppException("Each owner needs a partyId or a new party.");
 
         var owner = new BuildingOwner { BuildingId = buildingId, PartyId = partyId, OwnershipPercentage = o.OwnershipPercentage, IsPrimary = o.IsPrimary, FromDate = o.FromDate, ToDate = o.ToDate };
         Db.BuildingOwners.Add(owner);
         await Db.SaveChangesAsync();
+        await HttpContext.RequestServices.GetRequiredService<PartyService>().EnsureAccountAsync(partyId);
         return owner;
     }
 

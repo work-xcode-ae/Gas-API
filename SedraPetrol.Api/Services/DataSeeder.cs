@@ -27,16 +27,17 @@ public class DataSeeder
     {
         ("BUILDING_TYPE", "Building type", "نوع المبنى", new[] { ("residential", "Residential", "سكني"), ("commercial", "Commercial", "تجاري"), ("mixed", "Mixed use", "مختلط") }),
         ("BUILDING_STATUS", "Building status", "حالة المبنى", new[] { ("active", "Active", "نشط"), ("inactive", "Inactive", "غير نشط") }),
-        ("UNIT_TYPE", "Unit type", "نوع الوحدة", new[] { ("apartment", "Apartment", "شقة"), ("penthouse", "Penthouse", "بنتهاوس"), ("studio", "Studio", "استوديو"), ("duplex", "Duplex", "دوبلكس"), ("villa", "Villa", "فيلا"), ("commercial", "Commercial", "تجاري") }),
+        ("UNIT_TYPE", "Unit type", "نوع الوحدة", new[] { ("residential", "Residential", "سكني"), ("commercial", "Commercial", "تجاري"), ("office", "Office", "مكتب") }),
         ("UNIT_STATUS", "Unit status", "حالة الوحدة", new[] { ("vacant", "Vacant", "شاغرة"), ("occupied", "Occupied", "مشغولة"), ("reserved", "Reserved", "محجوزة"), ("maintenance", "Under maintenance", "تحت الصيانة") }),
         ("METER_TYPE", "Meter type", "نوع العداد", new[] { ("smart", "Smart", "ذكي"), ("standard", "Standard", "عادي"), ("prepaid", "Prepaid", "مسبق الدفع") }),
-        ("METER_STATUS", "Meter status", "حالة العداد", new[] { ("active", "Active", "نشط"), ("fault", "Fault", "عطل"), ("disconnected", "Disconnected", "مفصول"), ("maintenance", "Maintenance", "صيانة") }),
+        ("METER_STATUS", "Meter status", "حالة العداد", new[] { ("in_stock", "In stock", "في المخزون"), ("active", "Active", "نشط"), ("fault", "Fault", "عطل"), ("disconnected", "Disconnected", "مفصول"), ("maintenance", "Maintenance", "صيانة"), ("damaged", "Damaged", "تالف"), ("retired", "Retired / scrapped", "مستبعد / خارج الخدمة"), ("lost", "Lost / stolen", "مفقود") }),
         ("METER_SERVICE_TYPE", "Meter service type", "نوع خدمة العداد", new[] { ("connect", "Connect", "توصيل"), ("disconnect", "Disconnect", "فصل"), ("replace", "Replace", "استبدال"), ("report_issue", "Report issue", "إبلاغ عن مشكلة") }),
         ("METER_ISSUE_TYPE", "Meter issue type", "نوع مشكلة العداد", new[] { ("leak", "Gas leak", "تسرب غاز"), ("no_reading", "No reading", "لا توجد قراءة"), ("damaged", "Damaged", "تالف"), ("low_pressure", "Low pressure", "ضغط منخفض"), ("display", "Display fault", "عطل الشاشة"), ("other", "Other", "أخرى") }),
         ("SERVICE_STATUS", "Service status", "حالة الخدمة", new[] { ("pending", "Pending", "معلق"), ("in_progress", "In progress", "قيد التنفيذ"), ("completed", "Completed", "مكتمل"), ("cancelled", "Cancelled", "ملغي") }),
         ("READING_METHOD", "Reading method", "طريقة القراءة", new[] { ("manual", "Manual", "يدوي"), ("remote", "Remote", "عن بعد"), ("customer", "Customer", "العميل"), ("photo", "Photo", "صورة") }),
+        ("READING_TYPE", "Reading type", "نوع القراءة", new[] { ("opening", "Opening", "افتتاحية"), ("periodic", "Periodic", "دورية"), ("closing", "Closing", "ختامية"), ("replacement_out", "Replacement – old meter", "استبدال – العداد القديم"), ("replacement_in", "Replacement – new meter", "استبدال – العداد الجديد"), ("removal", "Meter removal", "فك العداد") }),
         ("CONTRACT_STATUS", "Contract status", "حالة العقد", new[] { ("draft", "Draft", "مسودة"), ("active", "Active", "نشط"), ("pending", "Pending", "معلق"), ("expired", "Expired", "منتهي"), ("terminated", "Terminated", "ملغي") }),
-        ("FEE_TYPE", "Fee type", "نوع الرسوم", new[] { ("gas_price", "Gas price (per m³)", "سعر الغاز (لكل م³)"), ("maintenance", "Maintenance", "صيانة"), ("connection", "Connection", "توصيل"), ("disconnection", "Disconnection", "فصل"), ("inspection", "Inspection", "فحص"), ("meter_rent", "Meter rent", "إيجار العداد"), ("insurance", "Insurance", "تأمين"), ("deposit", "Deposit", "تأمين نقدي"), ("gas_purchase", "Gas purchase", "شراء غاز"), ("other", "Other", "أخرى") }),
+        ("FEE_TYPE", "Fee type", "نوع الرسوم", new[] { ("gas_price", "Gas price (per m³)", "سعر الغاز (لكل م³)"), ("maintenance", "Maintenance", "صيانة"), ("connection", "Connection", "توصيل"), ("disconnection", "Disconnection", "فصل"), ("inspection", "Inspection", "فحص"), ("meter_rent", "Meter rent", "إيجار العداد"), ("insurance", "Insurance", "تأمين"), ("deposit", "Deposit", "تأمين نقدي"), ("gas_purchase", "Gas purchase", "شراء غاز"), ("other", "Other", "أخرى"), ("gov_fees", "Government fees (recharged)", "رسوم حكومية مستردة"), ("cd_service", "Civil Defense certificate service", "خدمة شهادة الدفاع المدني"), ("fixed_asset", "Fixed asset purchase", "شراء أصل ثابت") }),
         ("FEE_CYCLE", "Fee cycle", "دورة الرسوم", new[] { ("monthly", "Monthly", "شهري"), ("yearly", "Yearly", "سنوي"), ("one_time", "One time", "مرة واحدة"), ("per_m3", "Per m³", "لكل م³") }),
         ("INVOICE_TYPE", "Invoice type", "نوع الفاتورة", new[] { ("gas_consumption", "Gas consumption", "استهلاك غاز"), ("maintenance", "Maintenance", "صيانة"), ("deposit", "Deposit", "تأمين"), ("connection", "Connection", "توصيل"), ("other", "Other", "أخرى") }),
         ("INVOICE_STATUS", "Invoice status", "حالة الفاتورة", new[] { ("draft", "Draft", "مسودة"), ("pending", "Pending", "معلقة"), ("partial", "Partially paid", "مسددة جزئياً"), ("paid", "Paid", "مسددة"), ("overdue", "Overdue", "متأخرة"), ("cancelled", "Cancelled", "ملغاة") }),
@@ -54,14 +55,18 @@ public class DataSeeder
         ("SR_STATUS", "Service request status", "حالة طلب الخدمة", new[] { ("pending", "Pending", "معلق"), ("in_progress", "In progress", "قيد التنفيذ"), ("completed", "Completed", "مكتمل"), ("cancelled", "Cancelled", "ملغي") }),
         ("VISIT_TYPE", "Visit type", "نوع الزيارة", new[] { ("preventive", "Preventive", "وقائية"), ("corrective", "Corrective", "تصحيحية"), ("emergency", "Emergency", "طارئة"), ("inspection", "Inspection", "فحص") }),
         ("VISIT_STATUS", "Visit status", "حالة الزيارة", new[] { ("scheduled", "Scheduled", "مجدولة"), ("in_progress", "In progress", "قيد التنفيذ"), ("completed", "Completed", "مكتملة"), ("cancelled", "Cancelled", "ملغاة") }),
-        ("VISIT_FREQUENCY", "Visit frequency", "تكرار الزيارات", new[] { ("monthly", "Monthly", "شهري"), ("quarterly", "Quarterly", "ربع سنوي"), ("semi_annual", "Semi-annual", "نصف سنوي"), ("annual", "Annual", "سنوي") }),
+        ("VISIT_CHECKLIST", "Visit checklist", "قائمة الفحص", new[] { ("tank_valves_leak", "Inspect tank and valves for leaks", "فحص الخزان والصمامات للتأكد من عدم وجود تسرب"), ("pressure_regulators", "Check pressure regulators", "فحص منظمات الضغط"), ("leak_detectors", "Test gas leak detectors and alarms", "اختبار أجهزة كشف التسرب والإنذار"), ("piping_joints", "Inspect piping, joints and supports", "فحص الأنابيب والوصلات والدعامات"), ("emergency_valves", "Check emergency shut-off valves", "فحص صمامات الإغلاق الطارئ"), ("meters_seals", "Inspect meters and seals", "فحص العدادات والأختام"), ("fire_safety", "Verify fire extinguishers and signage", "التحقق من طفايات الحريق واللوحات الإرشادية") }),
+        ("DEPARTMENT", "Department", "القسم", new[] { ("operations", "Operations", "العمليات"), ("maintenance", "Maintenance", "الصيانة"), ("meter_reading", "Meter reading", "قراءة العدادات"), ("logistics", "Logistics / drivers", "النقل والسائقون"), ("finance", "Finance", "المالية"), ("sales", "Sales & customer service", "المبيعات وخدمة العملاء"), ("admin", "Administration", "الإدارة") }),
+        ("ASSET_CATEGORY", "Asset category", "فئة الأصل", new[] { ("equipment", "Gas equipment", "معدات غاز"), ("tools", "Tools", "أدوات"), ("safety", "Safety equipment", "معدات سلامة"), ("it", "IT / devices", "أجهزة وتقنية"), ("furniture", "Furniture", "أثاث"), ("vehicle_equipment", "Vehicle equipment", "معدات مركبات"), ("other", "Other", "أخرى") }),
+        ("ASSET_STATUS", "Asset status", "حالة الأصل", new[] { ("in_use", "In use", "قيد الاستخدام"), ("in_stock", "In stock", "في المخزن"), ("maintenance", "Under maintenance", "تحت الصيانة"), ("retired", "Retired", "مستبعد"), ("lost", "Lost / damaged", "مفقود / تالف") }),
+        ("VISIT_FREQUENCY", "Visit frequency", "تكرار الزيارات", new[] { ("monthly", "Monthly", "شهري"), ("bimonthly", "Every 2 months", "كل شهرين"), ("quarterly", "Quarterly", "ربع سنوي"), ("semi_annual", "Semi-annual", "نصف سنوي"), ("annual", "Annual", "سنوي") }),
         ("SEVERITY", "Severity", "الخطورة", new[] { ("info", "Info", "معلومة"), ("low", "Low", "منخفضة"), ("medium", "Medium", "متوسطة"), ("high", "High", "عالية"), ("critical", "Critical", "حرجة") }),
         ("AMC_STATUS", "AMC status", "حالة عقد الصيانة", new[] { ("pending", "Pending", "معلق"), ("active", "Active", "نشط"), ("expired", "Expired", "منتهي"), ("terminated", "Terminated", "ملغي") }),
         ("AMC_TERM_TYPE", "AMC term category", "فئة بند العقد", new[] { ("general", "General", "عام"), ("payment", "Payment", "الدفع"), ("sla", "Service level", "مستوى الخدمة"), ("liability", "Liability", "المسؤولية"), ("termination", "Termination", "الإنهاء"), ("other", "Other", "أخرى") }),
-        ("AMC_PAYMENT_STATUS", "AMC payment status", "حالة دفعة العقد", new[] { ("pending", "Pending", "معلقة"), ("billed", "Billed", "مفوترة"), ("paid", "Paid", "مدفوعة") }),
+        ("AMC_PAYMENT_STATUS", "AMC payment status", "حالة دفعة العقد", new[] { ("pending", "Pending", "معلقة"), ("invoiced", "Invoiced", "صدرت الفاتورة"), ("billed", "Billed", "مفوترة"), ("paid", "Paid", "مدفوعة") }),
         ("SCOPE_ITEM_TYPE", "Scope item type", "نوع بند النطاق", new[] { ("included", "Included", "مشمول"), ("excluded", "Excluded", "غير مشمول") }),
         ("CD_CERT_TYPE", "Civil Defense certificate type", "نوع شهادة الدفاع المدني", new[] { ("gas_installation", "Gas installation", "تمديدات الغاز"), ("fire_safety", "Fire safety", "السلامة من الحريق"), ("completion", "Completion", "إنجاز"), ("other", "Other", "أخرى") }),
-        ("CD_STATUS", "Civil Defense status", "حالة الدفاع المدني", new[] { ("valid", "Valid", "سارية"), ("expired", "Expired", "منتهية"), ("renewal_in_progress", "Renewal in progress", "قيد التجديد") }),
+        ("CD_STATUS", "Civil Defense status", "حالة الدفاع المدني", new[] { ("valid", "Valid", "سارية"), ("expired", "Expired", "منتهية"), ("renewal_in_progress", "Renewal in progress", "قيد التجديد"), ("pending", "Requested (not issued yet)", "قيد الإصدار") }),
         ("CD_RENEWAL_STATUS", "CD renewal status", "حالة التجديد", new[] { ("in_progress", "In progress", "قيد التنفيذ"), ("completed", "Completed", "مكتمل"), ("cancelled", "Cancelled", "ملغي") }),
         ("ACCOUNT_TYPE", "Account type", "نوع الحساب", new[] { ("asset", "Asset", "أصول"), ("liability", "Liability", "خصوم"), ("equity", "Equity", "حقوق ملكية"), ("revenue", "Revenue", "إيرادات"), ("expense", "Expense", "مصروفات") }),
         ("JOURNAL_STATUS", "Journal status", "حالة القيد", new[] { ("draft", "Draft", "مسودة"), ("posted", "Posted", "مرحل"), ("reversed", "Reversed", "معكوس") }),
@@ -75,20 +80,27 @@ public class DataSeeder
         {
             if (!await _db.Database.CanConnectAsync())
             {
-                _log.LogWarning("Seeder skipped: cannot connect to the database. Run sedra_schema_v2.2_sqlserver.sql first and check ConnectionStrings:SedraPetrol.");
+                _log.LogWarning("Seeder skipped: cannot connect to the database. Check ConnectionStrings:SedraPetrol (migrations create the database on startup).");
                 return;
             }
             await SeedLookupsAsync();
+            await NormalizeUnitTypesAsync();
             var (companyId, branchIds) = await SeedOrganizationAsync();
             await SeedGasTypesAsync();
             await SeedSecurityAsync(companyId, branchIds);
             await SeedAccountingAsync(companyId);
+            await SeedTaxRatesAsync(companyId);
+            await SeedOwnerBillingAsync(companyId);
+            await SeedFixedAssetAccountingAsync(companyId);
             await SeedChecklistsAsync();
+            await SeedTermTemplatesAsync();
             _log.LogInformation("Seed completed.");
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Seeding failed.");
+            // Fail loudly: without seed data (lookups, roles, admin user) nobody can log in.
+            throw new InvalidOperationException("Database seeding failed: " + (ex.InnerException?.Message ?? ex.Message), ex);
         }
     }
 
@@ -114,6 +126,25 @@ public class DataSeeder
             }
         }
         await _db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Unit types are only residential / commercial / office. Older databases were seeded with
+    /// apartment, penthouse, studio, duplex and villa: move those units to "residential" and hide the old values.
+    /// </summary>
+    private async Task NormalizeUnitTypesAsync()
+    {
+        var old = new[] { "apartment", "penthouse", "studio", "duplex", "villa" };
+        var typeId = await _db.LookupTypes.Where(t => t.Code == "UNIT_TYPE").Select(t => (long?)t.Id).FirstOrDefaultAsync();
+        if (typeId == null) return;
+        var oldValues = await _db.LookupValues.Where(v => v.LookupTypeId == typeId && old.Contains(v.Code) && v.IsActive).ToListAsync();
+        if (oldValues.Count == 0) return;
+        var residential = await LookupId("UNIT_TYPE", "residential");
+        var oldIds = oldValues.Select(v => (long?)v.Id).ToList();
+        await _db.Units.IgnoreQueryFilters().Where(u => oldIds.Contains(u.UnitTypeId)).ExecuteUpdateAsync(x => x.SetProperty(u => u.UnitTypeId, residential));
+        foreach (var v in oldValues) v.IsActive = false;
+        await _db.SaveChangesAsync();
+        _log.LogInformation("Unit types normalised: {Codes} → residential.", string.Join(", ", oldValues.Select(v => v.Code)));
     }
 
     private async Task<long> LookupId(string type, string code) =>
@@ -326,6 +357,135 @@ public class DataSeeder
                 _db.FiscalPeriods.Add(new FiscalPeriod { CompanyId = companyId, Year = y, PeriodNo = m, StartDate = start, EndDate = start.AddMonths(1).AddDays(-1), IsClosed = false });
             }
         }
+        await _db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Account mappings for owner billing (idempotent): recharged government fees credit the expense account the Civil Defense fees
+    /// are booked to (5104), so the recharge cancels the cost; our certificate service fee is revenue (4103).
+    /// </summary>
+    private async Task SeedOwnerBillingAsync(long companyId)
+    {
+        async Task Ensure(string code, string? debit, string? credit)
+        {
+            var key = await _db.LookupValues.Where(v => v.LookupType!.Code == "FEE_TYPE" && v.Code == code).Select(v => (long?)v.Id).FirstOrDefaultAsync();
+            if (key == null || await _db.AccountMappings.AnyAsync(m => m.CompanyId == companyId && m.SourceType == MappingSources.InvoiceItem && m.SourceKeyId == key)) return;
+            long? Acc(string? c) => c == null ? null : _db.Accounts.Where(a => a.CompanyId == companyId && a.AccountCode == c).Select(a => (long?)a.Id).FirstOrDefault();
+            var cr = Acc(credit);
+            if (credit != null && cr == null) return;   // chart of accounts differs: map it in Accounting > mappings
+            _db.AccountMappings.Add(new AccountMapping { CompanyId = companyId, SourceType = MappingSources.InvoiceItem, SourceKeyId = key, DebitAccountId = Acc(debit), CreditAccountId = cr, IsActive = true });
+            await _db.SaveChangesAsync();
+        }
+        await Ensure("gov_fees", null, "5104");
+        await Ensure("cd_service", null, "4103");
+    }
+
+    /// <summary>
+    /// Fixed assets (idempotent): account 1501 «Fixed assets» under the assets group, and bill lines of type
+    /// fixed_asset are debited to it (an asset bought from a supplier is capitalised, not expensed).
+    /// </summary>
+    private async Task SeedFixedAssetAccountingAsync(long companyId)
+    {
+        var acc = await _db.Accounts.FirstOrDefaultAsync(a => a.CompanyId == companyId && a.AccountCode == "1501");
+        if (acc == null)
+        {
+            var parent = await _db.Accounts.FirstOrDefaultAsync(a => a.CompanyId == companyId && a.AccountCode == "1");
+            if (parent == null) return;   // a different chart of accounts: map fixed_asset in Accounting > mappings
+            acc = new Account
+            {
+                CompanyId = companyId, AccountCode = "1501", NameEn = "Fixed assets", NameAr = "الأصول الثابتة",
+                AccountTypeId = await LookupId("ACCOUNT_TYPE", "asset"), ParentAccountId = parent.Id, Level = (short)((parent.Level ?? 1) + 1),
+                IsGroup = false, IsPostable = true, CurrencyId = parent.CurrencyId, IsActive = true,
+            };
+            _db.Accounts.Add(acc);
+            await _db.SaveChangesAsync();
+        }
+        var key = await _db.LookupValues.Where(v => v.LookupType!.Code == "FEE_TYPE" && v.Code == "fixed_asset").Select(v => (long?)v.Id).FirstOrDefaultAsync();
+        if (key == null || await _db.AccountMappings.AnyAsync(m => m.CompanyId == companyId && m.SourceType == MappingSources.VendorBillItem && m.SourceKeyId == key)) return;
+        _db.AccountMappings.Add(new AccountMapping { CompanyId = companyId, SourceType = MappingSources.VendorBillItem, SourceKeyId = key, DebitAccountId = acc.Id, IsActive = true });
+        await _db.SaveChangesAsync();
+    }
+
+    /// <summary>UAE VAT codes (standard 5% from 2018-01-01, zero-rated, exempt). Skipped when the tax_rate table is missing or already filled.</summary>
+    private async Task SeedTaxRatesAsync(long companyId)
+    {
+        try
+        {
+            if (await _db.TaxRates.IgnoreQueryFilters().AnyAsync())
+            {
+                // later additions: out-of-scope code for recharged government fees
+                if (!await _db.TaxRates.IgnoreQueryFilters().AnyAsync(t => t.Code == "VAT-OOS"))
+                {
+                    _db.TaxRates.Add(new TaxRate { CompanyId = companyId, Code = "VAT-OOS", NameAr = "خارج نطاق الضريبة (رسوم حكومية)", NameEn = "Out of scope (government fees)",
+                        Category = "out_of_scope", Rate = 0m, AppliesTo = "both", ValidFrom = new DateOnly(2018, 1, 1) });
+                    await _db.SaveChangesAsync();
+                }
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning("Tax rates not seeded (run the TaxRates migration): {Message}", ex.InnerException?.Message ?? ex.Message);
+            return;
+        }
+        long? Acc(string code) => _db.Accounts.Where(a => a.CompanyId == companyId && a.AccountCode == code).Select(a => (long?)a.Id).FirstOrDefault();
+        var outAcc = Acc("2201"); var inAcc = Acc("1301");
+        var from = new DateOnly(2018, 1, 1);
+        _db.TaxRates.AddRange(
+            new TaxRate { CompanyId = companyId, Code = "VAT-STD", NameAr = "ضريبة القيمة المضافة - أساسي", NameEn = "VAT standard rate", Category = "standard", Rate = 5m, AppliesTo = "both", ValidFrom = from, IsDefault = true, OutputAccountId = outAcc, InputAccountId = inAcc },
+            new TaxRate { CompanyId = companyId, Code = "VAT-ZERO", NameAr = "خاضع بنسبة صفر", NameEn = "Zero-rated", Category = "zero_rated", Rate = 0m, AppliesTo = "both", ValidFrom = from, OutputAccountId = outAcc, InputAccountId = inAcc },
+            new TaxRate { CompanyId = companyId, Code = "VAT-EXEMPT", NameAr = "معفى", NameEn = "Exempt", Category = "exempt", Rate = 0m, AppliesTo = "both", ValidFrom = from },
+            new TaxRate { CompanyId = companyId, Code = "VAT-OOS", NameAr = "خارج نطاق الضريبة (رسوم حكومية)", NameEn = "Out of scope (government fees)", Category = "out_of_scope", Rate = 0m, AppliesTo = "both", ValidFrom = from });
+        await _db.SaveChangesAsync();
+    }
+
+    /// <summary>Starter terms &amp; conditions (Settings). Skipped if the table is missing (migration not applied yet) or already filled.</summary>
+    private async Task SeedTermTemplatesAsync()
+    {
+        try
+        {
+            if (await _db.ContractTerms.IgnoreQueryFilters().AnyAsync(t => t.ContractId == null)) return;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning("Terms & conditions not seeded (run the ContractTerms migration): {Message}", ex.InnerException?.Message ?? ex.Message);
+            return;
+        }
+        var supply = new (string Cat, string Text)[]
+        {
+            ("safety", "يلتزم المستأجر بعدم العبث بالعداد أو تمديدات الغاز أو الخزان، ويتحمل تكلفة أي ضرر ناتج عن ذلك."),
+            ("safety", "يجب الإبلاغ فوراً عن أي تسرب أو رائحة غاز، ويُمنع استخدام اللهب أو المفاتيح الكهربائية عند الاشتباه بوجود تسرب."),
+            ("general", "العداد مخصص للوحدة ولا يجوز نقله أو فكه أو استبداله إلا بواسطة فني الشركة."),
+            ("general", "يحق لفريق الشركة الوصول إلى العداد والتمديدات لأغراض القراءة والفحص والصيانة في الأوقات المناسبة."),
+            ("payment", "تُصدر فواتير الاستهلاك بناءً على قراءة العداد وتُستحق خلال 15 يوماً من تاريخ إصدارها."),
+            ("payment", "يحق للشركة قطع الغاز في حال التأخر عن السداد لأكثر من 30 يوماً، وتُستحق رسوم القطع وإعادة التوصيل وفق العقد."),
+            ("renewal", "يُجدَّد العقد تلقائياً لمدة مماثلة ما لم يُخطر أحد الطرفين الآخر كتابياً قبل 30 يوماً من انتهائه."),
+            ("renewal", "عند إنهاء العقد تؤخذ قراءة ختامية وتُصدر فاتورة نهائية، وتُرد الوديعة بعد خصم أي مستحقات."),
+            ("liability", "لا تتحمل الشركة مسؤولية الأضرار الناتجة عن أجهزة المستأجر الخاصة أو سوء استخدامها."),
+        };
+        var amc = new (string Cat, string Text)[]
+        {
+            ("general", "يلتزم الطرف الأول بتسهيل وصول فريق الطرف الثاني إلى المبنى في المواعيد المتفق عليها."),
+            ("general", "يبدأ سريان هذا العقد من تاريخ توقيع الطرفين ويُعدّ ساري المفعول لمدة سنة كاملة."),
+            ("general", "يحق لأي من الطرفين إنهاء العقد بإشعار كتابي مدته 30 يوماً في حال إخلال الطرف الآخر ببنوده."),
+            ("payment", "يُسدَّد مبلغ العقد وفق الجدول المتفق عليه — أي تأخر يترتب عليه غرامة 2% شهرياً على الرصيد المتأخر."),
+            ("payment", "يُعدّ العقد مجمداً حتى استلام الطرف الثاني للدفعة الأولى المتفق عليها."),
+            ("service", "تُنجز الزيارات الدورية خلال 3 أيام عمل من تاريخها المقرر — التأخير غير المبرر يُعتبر خرقاً للعقد."),
+            ("service", "يتعهد الطرف الثاني بإصدار تقرير مفصّل لكل زيارة صيانة خلال 48 ساعة من إتمامها."),
+            ("service", "في حالات الطوارئ، يستجيب الطرف الثاني خلال وقت الاستجابة المتفق عليه من لحظة الإبلاغ."),
+            ("liability", "لا يتحمل الطرف الثاني مسؤولية الأضرار الناجمة عن سوء الاستخدام أو الحوادث الخارجة عن نطاق الصيانة المتفق عليها."),
+            ("liability", "تقتصر مسؤولية الطرف الثاني التعويضية بحد أقصى قيمة عقد الصيانة السنوي."),
+            ("renewal", "يُجدَّد العقد تلقائياً لمدة مماثلة ما لم يُخطر أحد الطرفين الآخر بعدم التجديد قبل 60 يوماً من انتهائه."),
+            ("renewal", "عند التجديد، يحق للطرف الثاني مراجعة الرسوم بحد أقصى 5% وفق مؤشر التضخم السنوي المعتمد."),
+            ("dispute", "يُحكم هذا العقد وفق قوانين إمارة أبوظبي — أي نزاع يُحال إلى القضاء الإماراتي المختص."),
+            ("dispute", "يسعى الطرفان أولاً إلى التسوية الودية لأي نزاع خلال 30 يوماً قبل اللجوء إلى أي إجراء قانوني."),
+        };
+        var n = 0;
+        foreach (var (cat, text) in supply)
+            _db.ContractTerms.Add(new ContractTerm { ContractType = "supply", Category = cat, TextAr = text, IsDefault = true, SortOrder = (++n) * 10 });
+        n = 0;
+        foreach (var (cat, text) in amc)
+            _db.ContractTerms.Add(new ContractTerm { ContractType = "amc", Category = cat, TextAr = text, IsDefault = false, SortOrder = (++n) * 10 });
         await _db.SaveChangesAsync();
     }
 

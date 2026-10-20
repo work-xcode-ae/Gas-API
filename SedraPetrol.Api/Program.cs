@@ -16,15 +16,20 @@ var cfg = builder.Configuration;
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ICurrentUser, CurrentUser>();
 builder.Services.AddDbContext<AppDbContext>(o =>
-    o.UseSqlServer(cfg.GetConnectionString("SedraPetrol"), sql => sql.EnableRetryOnFailure(3)));
+    // No EnableRetryOnFailure: the services use explicit transactions (BeginTransactionAsync),
+    // which the retrying execution strategy does not allow.
+    o.UseSqlServer(cfg.GetConnectionString("SedraPetrol")));
 
 // ---------- Application services ----------
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<LookupService>();
 builder.Services.AddScoped<NumberingService>();
+builder.Services.AddScoped<PartyService>();
 builder.Services.AddScoped<ActivityLogger>();
 builder.Services.AddScoped<PostingService>();
 builder.Services.AddScoped<BillingService>();
+builder.Services.AddScoped<OwnerBillingService>();
+builder.Services.AddScoped<TaxService>();
 builder.Services.AddScoped<BalanceQueries>();
 builder.Services.AddScoped<ContractService>();
 builder.Services.AddScoped<MeterOps>();
@@ -32,6 +37,7 @@ builder.Services.AddScoped<AlertsQuery>();
 builder.Services.AddScoped<FileStorageService>();
 builder.Services.AddScoped<DataSeeder>();
 builder.Services.AddScoped<TokenService>();
+builder.Services.AddScoped<RefreshTokenService>();
 builder.Services.AddHostedService<DailyJobsService>();
 builder.Services.Configure<JwtOptions>(cfg.GetSection("Jwt"));
 builder.Services.Configure<StorageOptions>(cfg.GetSection("Storage"));
@@ -51,6 +57,16 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
         ValidateLifetime = true, ClockSkew = TimeSpan.FromMinutes(2),
         RoleClaimType = System.Security.Claims.ClaimTypes.Role,
         NameClaimType = System.Security.Claims.ClaimTypes.Name,
+    };
+    // a revoked session (logout, logout-all, password change, user disabled, theft detection) is refused immediately
+    o.Events = new JwtBearerEvents
+    {
+        OnTokenValidated = async ctx =>
+        {
+            var sid = ctx.Principal?.FindFirst("sid")?.Value;
+            if (sid == null || !Guid.TryParse(sid, out var family)) return;   // tokens issued before sessions existed
+            if (await SessionCheck.IsRevokedAsync(ctx.HttpContext.RequestServices, family)) ctx.Fail("Session revoked.");
+        },
     };
 });
 builder.Services.AddAuthorization();
@@ -88,11 +104,19 @@ builder.Services.AddSwaggerGen(c =>
 
 var app = builder.Build();
 
-// ---------- Seed (idempotent) ----------
+// ---------- Database: apply EF migrations (creates the database on first run), then seed ----------
+if (cfg.GetValue("Database:MigrateOnStartup", true))
+{
+    using var scope = app.Services.CreateScope();
+    await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.MigrateAsync();
+}
 if (cfg.GetValue<bool>("Seed:Enabled"))
 {
     using var scope = app.Services.CreateScope();
     await scope.ServiceProvider.GetRequiredService<DataSeeder>().SeedAsync();
+    // every person / company has its own ledger account
+    try { await scope.ServiceProvider.GetRequiredService<PartyService>().EnsureAllAccountsAsync(); }
+    catch (Exception ex) { app.Logger.LogWarning(ex, "Party accounts were not created."); }
 }
 
 app.UseMiddleware<ExceptionMiddleware>();

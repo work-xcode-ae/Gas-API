@@ -25,11 +25,11 @@ public class RefillRequestsController : ApiControllerBase
     public record PoInput(long VendorId, string? PoNumber, DateOnly? PoDate, decimal? Qty, decimal UnitPrice, string? Notes);
     public record PaymentInput(decimal Amount, DateOnly? Date, string? Method, string? Reference, string? Notes);
     public record CollectionInput(long? VehicleId, string? TankerPlate, long? DriverId, string? DriverName, DateTimeOffset? CollectionDate,
-        decimal? MeterBefore, decimal? MeterAfter, decimal? CollectedQty);
+        decimal? MeterBefore, decimal? MeterAfter, decimal? CollectedQty, bool OwnVehicle = false, string? DriverPhone = null);
     public record InvoiceInput(string InvoiceNumber, DateOnly? InvoiceDate, decimal? Amount, decimal? VatRate, DateOnly? DueDate);
     public record ScheduleInput(DateOnly DeliveryDate, string? TimeSlot, bool CivilDefenseConfirmed, string? CivilDefenseRef);
     public record RefillInput(DateTimeOffset? RefillDateTime, DateOnly? RefillDate, string? RefillTime, long? VehicleId, string? TankerPlate,
-        long? DriverId, string? DriverName, decimal LevelBefore, decimal LevelAfter, bool? SafetyCheckPassed, string? Notes);
+        long? DriverId, string? DriverName, decimal LevelBefore, decimal LevelAfter, bool? SafetyCheckPassed, string? Notes, string? DriverPhone = null);
     public record ApproveInput(string? Notes);
     public record CancelInput(string? Reason);
 
@@ -92,7 +92,7 @@ public class RefillRequestsController : ApiControllerBase
 
         var r = new RefillRequest
         {
-            BranchId = tank.BranchId,
+            BranchId = tank.BranchId ?? 0,
             RequestNo = await Numbers.NextAsync(NumberPrefixes.Refill),
             TankId = tank.Id,
             RequestDate = input.RequestDate ?? Today,
@@ -119,6 +119,7 @@ public class RefillRequestsController : ApiControllerBase
     {
         var (r, _) = await Load(id, expectedStage: 0);
         var vendor = await Db.Vendors.FirstOrDefaultAsync(v => v.Id == input.VendorId) ?? throw new NotFoundException("Vendor", input.VendorId);
+        if (vendor.Party!.PartyCode is "OWN-COMPANY" or "CIVIL-DEFENSE") throw new BusinessRuleException("The gas supplier must be a third-party vendor.");
         var qty = input.Qty ?? r.RequestedQtyLitres;
         if (qty <= 0 || input.UnitPrice < 0) throw new AppException("Quantity and unit price must be positive.");
         Db.RefillPos.Add(new RefillPo
@@ -128,7 +129,7 @@ public class RefillRequestsController : ApiControllerBase
             PoDate = input.PoDate ?? Today, QtyLitres = qty, UnitPrice = input.UnitPrice, TotalAmount = BillingService.R2(qty * input.UnitPrice),
             CurrencyId = await Db.Currencies.Where(c => c.Code == "AED").Select(c => (long?)c.Id).FirstOrDefaultAsync(),
         });
-        await Advance(r, 1, input.Notes ?? $"PO issued to {vendor.NameEn ?? vendor.NameAr}");
+        await Advance(r, 1, input.Notes ?? $"PO issued to {vendor.Party!.NameEn ?? vendor.Party!.NameAr}");
         return Ok(await Get(id));
     }
 
@@ -168,8 +169,10 @@ public class RefillRequestsController : ApiControllerBase
         var po = await Db.RefillPos.FirstAsync(p => p.RefillRequestId == id);
         var qty = input.CollectedQty ?? (input.MeterAfter - input.MeterBefore);
         if (qty is null or <= 0) throw new AppException("Collected quantity must be greater than zero (meter after must be greater than meter before).");
-        var vehicleId = await ResolveVehicle(input.VehicleId, input.TankerPlate, po.VendorId);
-        var driverId = await ResolveDriver(input.DriverId, input.DriverName, po.VendorId);
+        // the tanker is the supplier's (third party) or ours: a new plate / driver is registered under the supplier, or under no vendor for our fleet
+        var owner = input.OwnVehicle ? null : (long?)po.VendorId;
+        var vehicleId = await ResolveVehicle(input.VehicleId, input.TankerPlate, owner);
+        var driverId = await ResolveDriver(input.DriverId, input.DriverName, owner, input.DriverPhone);
         Db.RefillCollections.Add(new RefillCollection
         {
             RefillRequestId = r.Id, VehicleId = vehicleId, DriverId = driverId, CollectionDate = input.CollectionDate ?? DateTimeOffset.UtcNow,
@@ -254,7 +257,7 @@ public class RefillRequestsController : ApiControllerBase
         {
             RefillRequestId = r.Id, TankId = tank.Id, RefillDatetime = when,
             VehicleId = await ResolveVehicle(input.VehicleId, input.TankerPlate, po.VendorId),
-            DriverId = await ResolveDriver(input.DriverId, input.DriverName, po.VendorId),
+            DriverId = await ResolveDriver(input.DriverId, input.DriverName, po.VendorId, input.DriverPhone),
             LevelBeforeLitres = input.LevelBefore, LevelAfterLitres = input.LevelAfter, DeliveredQtyLitres = input.LevelAfter - input.LevelBefore,
             SafetyCheckPassed = input.SafetyCheckPassed, Notes = input.Notes,
         };
@@ -342,13 +345,27 @@ public class RefillRequestsController : ApiControllerBase
         return v.Id;
     }
 
-    private async Task<long?> ResolveDriver(long? driverId, string? name, long? vendorId)
+    private async Task<long?> ResolveDriver(long? driverId, string? name, long? vendorId, string? phone = null)
     {
+        phone = string.IsNullOrWhiteSpace(phone) ? null : phone.Trim();
         if (driverId != null) return await Db.Drivers.AnyAsync(d => d.Id == driverId) ? driverId : throw new NotFoundException("Driver", driverId);
         if (string.IsNullOrWhiteSpace(name)) return null;
         name = name.Trim();
-        var d = await Db.Drivers.FirstOrDefaultAsync(x => x.NameAr == name || x.NameEn == name);
-        if (d == null) { d = new Driver { NameAr = name, NameEn = name, VendorId = vendorId, IsActive = true }; Db.Drivers.Add(d); await Db.SaveChangesAsync(); }
+        var d = await Db.Drivers.FirstOrDefaultAsync(x => x.Party!.NameAr == name || x.Party!.NameEn == name);
+        if (d == null)
+        {
+            var parties = HttpContext.RequestServices.GetRequiredService<PartyService>();
+            var p = await parties.NewAsync(null, new PartyService.PartyInput { NameAr = name, NameEn = name, Phone = phone });
+            d = new Driver { Party = p, VendorId = vendorId, IsActive = true };
+            Db.Drivers.Add(d);
+            await Db.SaveChangesAsync();
+            await parties.EnsureAccountAsync(d.Id);
+        }
+        else if (phone != null && d.Party != null && string.IsNullOrWhiteSpace(d.Party.Phone))
+        {
+            d.Party.Phone = phone;   // keep the number entered on the request
+            await Db.SaveChangesAsync();
+        }
         return d.Id;
     }
 
@@ -363,7 +380,7 @@ public class RefillRequestsController : ApiControllerBase
         var userIds = list.Select(r => r.RequestedBy).Concat(list.Select(r => r.ApprovedBy)).Where(x => x != null).Select(x => x!.Value).Distinct().ToList();
         var users = await Db.AppUsers.AsNoTracking().Where(u => userIds.Contains(u.Id)).ToDictionaryAsync(u => u.Id, u => Loc(u.NameEn, u.NameAr));
         var pos = await Db.RefillPos.AsNoTracking().Where(p => ids.Contains(p.RefillRequestId))
-            .Select(p => new { p.RefillRequestId, p.PoNumber, p.PoDate, p.QtyLitres, p.UnitPrice, p.TotalAmount, p.VendorId, p.Vendor!.NameEn, p.Vendor.NameAr, p.Vendor.Phone })
+            .Select(p => new { p.RefillRequestId, p.PoNumber, p.PoDate, p.QtyLitres, p.UnitPrice, p.TotalAmount, p.VendorId, p.Vendor!.Party!.NameEn, p.Vendor.Party!.NameAr, p.Vendor.Party!.Phone })
             .ToDictionaryAsync(p => p.RefillRequestId);
         var pays = await (from s in Db.RefillSupplierPayments.AsNoTracking()
                           join vp in Db.VendorPayments on s.VendorPaymentId equals vp.Id
@@ -371,7 +388,7 @@ public class RefillRequestsController : ApiControllerBase
                           select new { s.RefillRequestId, vp.Id, vp.PaymentNo, vp.Amount, vp.PaymentDate, vp.PaymentMethodId, vp.ReferenceNo })
                          .ToDictionaryAsync(p => p.RefillRequestId);
         var cols = await Db.RefillCollections.AsNoTracking().Where(c => ids.Contains(c.RefillRequestId))
-            .Select(c => new { c.RefillRequestId, c.VehicleId, Plate = c.Vehicle!.PlateNo, c.DriverId, DriverEn = c.Driver!.NameEn, DriverAr = c.Driver.NameAr, c.CollectionDate, c.MeterBefore, c.MeterAfter, c.CollectedQtyLitres })
+            .Select(c => new { c.RefillRequestId, c.VehicleId, Plate = c.Vehicle!.PlateNo, c.DriverId, DriverEn = c.Driver!.Party!.NameEn, DriverAr = c.Driver.Party!.NameAr, DriverPhone = c.Driver.Party!.Phone, c.CollectionDate, c.MeterBefore, c.MeterAfter, c.CollectedQtyLitres })
             .ToDictionaryAsync(c => c.RefillRequestId);
         var bills = await (from p in Db.RefillPurchaseInvoices.AsNoTracking()
                            join b in Db.VendorBills on p.VendorBillId equals b.Id
@@ -381,7 +398,7 @@ public class RefillRequestsController : ApiControllerBase
         var schedules = await Db.RefillSchedules.AsNoTracking().Where(s => ids.Contains(s.RefillRequestId)).ToDictionaryAsync(s => s.RefillRequestId);
         var refills = await Db.TankRefills.AsNoTracking().Where(t => ids.Contains(t.RefillRequestId))
             .Select(t => new { t.RefillRequestId, t.Id, t.RefillDatetime, t.LevelBeforeLitres, t.LevelAfterLitres, t.DeliveredQtyLitres, t.SafetyCheckPassed, t.Notes,
-                               Plate = t.Vehicle!.PlateNo, DriverEn = t.Driver!.NameEn, DriverAr = t.Driver.NameAr })
+                               Plate = t.Vehicle!.PlateNo, DriverEn = t.Driver!.Party!.NameEn, DriverAr = t.Driver.Party!.NameAr })
             .ToDictionaryAsync(t => t.RefillRequestId);
 
         return list.Select(r =>
@@ -406,7 +423,7 @@ public class RefillRequestsController : ApiControllerBase
                 {
                     po = po == null ? null : new { supplierId = po.VendorId, supplier = Loc(po.NameEn, po.NameAr), po.PoNumber, po.PoDate, poQty = po.QtyLitres, po.UnitPrice, po.TotalAmount, supplierContact = po.Phone },
                     payment = pay == null ? null : new { vendorPaymentId = pay.Id, pay.PaymentNo, pay.Amount, date = pay.PaymentDate, method = Code(pay.PaymentMethodId), reference = pay.ReferenceNo },
-                    collection = col == null ? null : new { col.VehicleId, tankerPlate = col.Plate, col.DriverId, driverName = Loc(col.DriverEn, col.DriverAr), col.CollectionDate, col.MeterBefore, col.MeterAfter, collectedQty = col.CollectedQtyLitres },
+                    collection = col == null ? null : new { col.VehicleId, tankerPlate = col.Plate, col.DriverId, driverName = Loc(col.DriverEn, col.DriverAr), driverPhone = col.DriverPhone, col.CollectionDate, col.MeterBefore, col.MeterAfter, collectedQty = col.CollectedQtyLitres },
                     invoice = bill == null ? null : new { vendorBillId = bill.Id, invoiceNumber = bill.BillNo, invoiceDate = bill.BillDate, amount = bill.TotalAmount, bill.Subtotal, bill.VatAmount, status = Code(bill.StatusId) },
                     schedule = sch == null ? null : new { sch.DeliveryDate, deliveryTime = sch.TimeSlot, sch.CivilDefenseConfirmed, sch.CivilDefenseRef },
                     refill = rf == null ? null : new { tankRefillId = rf.Id, refillDate = rf.RefillDatetime, refillTime = rf.RefillDatetime.ToString("HH:mm"), tankMeterBefore = rf.LevelBeforeLitres, tankMeterAfter = rf.LevelAfterLitres,

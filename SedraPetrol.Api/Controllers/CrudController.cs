@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Domain.Entities;
+using SedraPetrol.Api.Services;
 
 namespace SedraPetrol.Api.Controllers;
 
@@ -55,6 +56,13 @@ public abstract class CrudController<T> : ApiControllerBase where T : AuditableE
         return q.Where(Expression.Lambda<Func<T, bool>>(c, p));
     }
 
+    /// <summary>e.Prop, or e.Party.Name for a role property stored on the party ([PartyField]).</summary>
+    protected static Expression MemberOf(ParameterExpression p, PropertyInfo prop)
+    {
+        var pf = prop.GetCustomAttribute<PartyFieldAttribute>();
+        return pf == null ? Expression.Property(p, prop) : Expression.Property(Expression.Property(p, nameof(PartyRole.Party)), pf.Name);
+    }
+
     /// <summary>Default search: any short text column contains the term.</summary>
     protected virtual Expression<Func<T, bool>>? SearchPredicate(string term)
     {
@@ -65,7 +73,7 @@ public abstract class CrudController<T> : ApiControllerBase where T : AuditableE
         {
             var max = prop.GetCustomAttribute<MaxLengthAttribute>()?.Length;
             if (max is null or > 300) continue;
-            var member = Expression.Property(p, prop);
+            var member = MemberOf(p, prop);
             var test = Expression.AndAlso(Expression.NotEqual(member, Expression.Constant(null, typeof(string))),
                                           Expression.Call(member, containsMethod, Expression.Constant(term)));
             body = body == null ? test : Expression.OrElse(body, test);
@@ -100,8 +108,11 @@ public abstract class CrudController<T> : ApiControllerBase where T : AuditableE
         ResetAudit(entity);
         if (BranchProp != null) EnsureBranchAccess(BranchProp.GetValue(entity) as long?);
         await OnCreatingAsync(entity);
+        var parties = entity is PartyRole ? HttpContext.RequestServices.GetRequiredService<PartyService>() : null;
+        if (entity is PartyRole role) await parties!.PrepareRoleAsync(role, BranchProp?.GetValue(entity) as long?);
         Db.Set<T>().Add(entity);
         await Db.SaveChangesAsync();
+        if (parties != null) await parties.EnsureAccountAsync(entity.Id);
         await OnSavedAsync(entity, "create");
         return CreatedAtAction(nameof(Get), new { id = entity.Id }, entity);
     }
@@ -113,12 +124,14 @@ public abstract class CrudController<T> : ApiControllerBase where T : AuditableE
         await OnUpdatingAsync(existing, incoming);
         foreach (var p in Scalars)
         {
+            if (p.SetMethod is not { IsPublic: true }) continue;   // set by the system (contract_type, asset_type …)
             if (p.Name is nameof(AuditableEntity.Id) or nameof(AuditBase.CreatedAt) or nameof(AuditBase.CreatedBy)
                 or nameof(AuditBase.UpdatedAt) or nameof(AuditBase.UpdatedBy) or nameof(AuditBase.IsDeleted)) continue;
             p.SetValue(existing, p.GetValue(incoming));
         }
         if (BranchProp != null) EnsureBranchAccess(BranchProp.GetValue(existing) as long?);
         await Db.SaveChangesAsync();
+        if (existing is PartyRole) await HttpContext.RequestServices.GetRequiredService<PartyService>().EnsureAccountAsync(existing.Id);   // keeps the account name in step
         await OnSavedAsync(existing, "update");
         return Ok(existing);
     }
@@ -148,7 +161,7 @@ public abstract class CrudController<T> : ApiControllerBase where T : AuditableE
             if (prop == null) continue;
             var raw = values.ToString();
             var p = Expression.Parameter(typeof(T), "e");
-            var member = Expression.Property(p, prop);
+            var member = MemberOf(p, prop);
             Expression body;
             if (raw.Equals("null", StringComparison.OrdinalIgnoreCase))
             {
@@ -176,6 +189,12 @@ public abstract class CrudController<T> : ApiControllerBase where T : AuditableE
         }
 
         var sortProp = Scalars.FirstOrDefault(p => string.Equals(p.Name, q.Sort, StringComparison.OrdinalIgnoreCase));
+        if (sortProp?.GetCustomAttribute<PartyFieldAttribute>() is { } spf)
+        {
+            var sp = Expression.Parameter(typeof(T), "e");
+            var key = Expression.Lambda<Func<T, object?>>(Expression.Convert(MemberOf(sp, sortProp), typeof(object)), sp);
+            return q.Desc ? query.OrderByDescending(key) : query.OrderBy(key);
+        }
         var sortName = sortProp?.Name ?? nameof(AuditableEntity.Id);
         return q.Desc ? query.OrderByDescending(e => EF.Property<object>(e, sortName))
                       : query.OrderBy(e => EF.Property<object>(e, sortName));

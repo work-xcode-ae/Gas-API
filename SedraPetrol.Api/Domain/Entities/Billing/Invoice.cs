@@ -80,7 +80,7 @@ public partial class Invoice : AuditableEntity
     public Building? Building { get; set; }
 
     [ForeignKey(nameof(ContractId)), JsonIgnore]
-    public SupplyContract? Contract { get; set; }
+    public Contract? Contract { get; set; }
 
     [ForeignKey(nameof(InvoiceTypeId)), JsonIgnore]
     public LookupValue? InvoiceType { get; set; }
