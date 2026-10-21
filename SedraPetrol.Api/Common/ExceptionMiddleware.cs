@@ -41,6 +41,11 @@ public class ExceptionMiddleware
             await TrailRejected(ctx, status, msg, code);
             await Write(ctx, status, msg, code);
         }
+        catch (Exception) when (ctx.RequestAborted.IsCancellationRequested)
+        {
+            // the browser closed / cancelled the request (page changed, tab closed): nothing to answer, not an error
+            _logger.LogDebug("Request cancelled by the client: {Method} {Path}", ctx.Request.Method, ctx.Request.Path);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unhandled exception");
