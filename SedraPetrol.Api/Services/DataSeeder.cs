@@ -94,6 +94,8 @@ public class DataSeeder
             await SeedFixedAssetAccountingAsync(companyId);
             await SeedChecklistsAsync();
             await SeedTermTemplatesAsync();
+            await SeedBilingualSupplyTermsAsync();
+            await SeedCompanyPrintDefaultsAsync(companyId);
             _log.LogInformation("Seed completed.");
         }
         catch (Exception ex)
@@ -451,18 +453,6 @@ public class DataSeeder
             _log.LogWarning("Terms & conditions not seeded (run the ContractTerms migration): {Message}", ex.InnerException?.Message ?? ex.Message);
             return;
         }
-        var supply = new (string Cat, string Text)[]
-        {
-            ("safety", "يلتزم المستأجر بعدم العبث بالعداد أو تمديدات الغاز أو الخزان، ويتحمل تكلفة أي ضرر ناتج عن ذلك."),
-            ("safety", "يجب الإبلاغ فوراً عن أي تسرب أو رائحة غاز، ويُمنع استخدام اللهب أو المفاتيح الكهربائية عند الاشتباه بوجود تسرب."),
-            ("general", "العداد مخصص للوحدة ولا يجوز نقله أو فكه أو استبداله إلا بواسطة فني الشركة."),
-            ("general", "يحق لفريق الشركة الوصول إلى العداد والتمديدات لأغراض القراءة والفحص والصيانة في الأوقات المناسبة."),
-            ("payment", "تُصدر فواتير الاستهلاك بناءً على قراءة العداد وتُستحق خلال 15 يوماً من تاريخ إصدارها."),
-            ("payment", "يحق للشركة قطع الغاز في حال التأخر عن السداد لأكثر من 30 يوماً، وتُستحق رسوم القطع وإعادة التوصيل وفق العقد."),
-            ("renewal", "يُجدَّد العقد تلقائياً لمدة مماثلة ما لم يُخطر أحد الطرفين الآخر كتابياً قبل 30 يوماً من انتهائه."),
-            ("renewal", "عند إنهاء العقد تؤخذ قراءة ختامية وتُصدر فاتورة نهائية، وتُرد الوديعة بعد خصم أي مستحقات."),
-            ("liability", "لا تتحمل الشركة مسؤولية الأضرار الناتجة عن أجهزة المستأجر الخاصة أو سوء استخدامها."),
-        };
         var amc = new (string Cat, string Text)[]
         {
             ("general", "يلتزم الطرف الأول بتسهيل وصول فريق الطرف الثاني إلى المبنى في المواعيد المتفق عليها."),
@@ -481,11 +471,95 @@ public class DataSeeder
             ("dispute", "يسعى الطرفان أولاً إلى التسوية الودية لأي نزاع خلال 30 يوماً قبل اللجوء إلى أي إجراء قانوني."),
         };
         var n = 0;
-        foreach (var (cat, text) in supply)
-            _db.ContractTerms.Add(new ContractTerm { ContractType = "supply", Category = cat, TextAr = text, IsDefault = true, SortOrder = (++n) * 10 });
+        foreach (var (cat, en, ar) in SupplyTermsBilingual)
+            _db.ContractTerms.Add(new ContractTerm { ContractType = "supply", Category = cat, TextAr = ar, TextEn = en, IsDefault = true, SortOrder = (++n) * 10 });
         n = 0;
         foreach (var (cat, text) in amc)
             _db.ContractTerms.Add(new ContractTerm { ContractType = "amc", Category = cat, TextAr = text, IsDefault = false, SortOrder = (++n) * 10 });
+        await _db.SaveChangesAsync();
+    }
+
+    private static readonly string[] GenericSupplyTermsAr =
+    {
+        "يلتزم المستأجر بعدم العبث بالعداد أو تمديدات الغاز أو الخزان، ويتحمل تكلفة أي ضرر ناتج عن ذلك.",
+        "يجب الإبلاغ فوراً عن أي تسرب أو رائحة غاز، ويُمنع استخدام اللهب أو المفاتيح الكهربائية عند الاشتباه بوجود تسرب.",
+        "العداد مخصص للوحدة ولا يجوز نقله أو فكه أو استبداله إلا بواسطة فني الشركة.",
+        "يحق لفريق الشركة الوصول إلى العداد والتمديدات لأغراض القراءة والفحص والصيانة في الأوقات المناسبة.",
+        "تُصدر فواتير الاستهلاك بناءً على قراءة العداد وتُستحق خلال 15 يوماً من تاريخ إصدارها.",
+        "يحق للشركة قطع الغاز في حال التأخر عن السداد لأكثر من 30 يوماً، وتُستحق رسوم القطع وإعادة التوصيل وفق العقد.",
+        "يُجدَّد العقد تلقائياً لمدة مماثلة ما لم يُخطر أحد الطرفين الآخر كتابياً قبل 30 يوماً من انتهائه.",
+        "عند إنهاء العقد تؤخذ قراءة ختامية وتُصدر فاتورة نهائية، وتُرد الوديعة بعد خصم أي مستحقات.",
+        "لا تتحمل الشركة مسؤولية الأضرار الناتجة عن أجهزة المستأجر الخاصة أو سوء استخدامها.",
+    };
+    /// <summary>
+    /// The company's standard gas supply contract terms (English + Arabic, as printed on the contract). Values in braces are filled in
+    /// when the contract is printed: {advance_total} {connection_fee} {deposit} {disconnection_fee} {gas_price} {service_fee} {billing_months}.
+    /// Replaces the first generic Arabic-only templates once, if nobody has edited them.
+    /// </summary>
+    public static readonly (string Cat, string En, string Ar)[] SupplyTermsBilingual =
+    {
+        ("general", "The first party undertakes to supply continuously the second party with gas and to provide service upon request.",
+                    "يلتزم الطرف الأول بتزويد الطرف الثاني بشكل مستمر بالغاز وتوفير الخدمة عند الطلب."),
+        ("payment", "The second party shall pay an amount of AED {advance_total} against supply of his flat with gas divided as follows:\n- AED {connection_fee} connection kitchen fee\n- AED {deposit} gas deposit refundable when second party vacates the flat\n- AED {disconnection_fee} disconnection gas fee after the evacuation of the residence.",
+                    "يتعهد الطرف الثاني بدفع مبلغ {advance_total} درهم مقابل تزويد شقته بالغاز مقسمة على النحو التالي:\n- {connection_fee} درهم رسوم الغاز إلى المطبخ\n- {deposit} درهم تأمين استهلاك يسترد عند إخلاء الطرف الثاني الشقة\n- {disconnection_fee} درهم رسوم فصل الطباخ من الغاز بعد الإخلاء من السكن وإجراء العمل المطلوب."),
+        ("payment", "The first party forwards the gas consumptions invoice every {billing_months} months at {gas_price} AED CU.M. In addition, the Second Party is liable to pay {service_fee} AED/Monthly as service charge (clause 13).\nThe second party confirms that he reads, understand and abides by all terms & conditions of this contract mentioned above and in overleaf.",
+                    "يقدم الطرف الأول فاتورة استهلاك الغاز كل {billing_months} أشهر بسعر {gas_price} درهم للمتر المكعب، إضافة إلى إلتزام الطرف الثاني بدفع مبلغ {service_fee} درهم / شهرياً كرسوم خدمة (بند 13)."),
+        ("payment", "Upon receiving the invoice, the second party will pay the full amount, any delay in payment more than one month dispose you to disconnect the service and reconnection charges.",
+                    "يتعهد الطرف الثاني بدفع فاتورة إستهلاك الغاز كاملة في موعدها وأي تأخير في السداد أكثر من شهر سيعرضكم لفصل الخدمة وتحمل رسوم إعادة الغاز."),
+        ("payment", "First party may send the gas invoice before the elapse of the six months to same tenants (second party) in order to follow the meter reading schedule of the building and in compliance with the annual inspection and examination of the central gas system.",
+                    "قد يلجأ الطرف الأول لتقديم فاتورة الغاز قبل نهاية ستة أشهر لبعض السكان وذلك تقيداً بالجدول الزمني لقراءة العدادات بالبناية وتوافقاً مع الفحص والتجريب الدوري لنظام الغاز المركزي."),
+        ("safety", "The second party undertakes to abide to all the safety instruction for the operation of central gas system (copy attached).",
+                   "يتعهد الطرف الثاني بإتباع كافة تعليمات السلامة لإستعمال نظام الغاز المركزي (صورة مرفقة)."),
+        ("safety", "Connection, disconnection and maintenance of the gas branch will be done exclusively by first party technicians. First party will bear no responsibility whatsoever for any damage caused by connection or disconnection of the cooker by other party.",
+                   "تتم عملية التوصيل والفصل وصيانة فرع الغاز بواسطة فنيي الطرف الأول فقط، ولا يتحمل الطرف الأول أدنى مسؤولية عن أي ضرر قد ينجم لا قدر الله عند توصيل أو فصل الطباخ من قبل أي جهة أخرى."),
+        ("renewal", "Second party should contact the first party 24 hours prior vacating his flat in order to take the final gas meter reading, disconnect the gas branch and necessary safety precaution and issuing the final bill and Clearance Certificate.",
+                    "على الطرف الثاني الإتصال بالطرف الأول قبل إخلاء الشقة بأربع وعشرين ساعة على الأقل حتى يتمكن من قراءة العداد وقفل توصيلة الغاز وإتخاذ كافة إجراءات السلامة اللازمة وإصدار الفاتورة النهائية وشهادة إبراء ذمة."),
+        ("liability", "Second party bears all liabilities resulting from vacating his flat without referring to the first party do the needful.",
+                      "يتحمل الطرف الثاني كافة التبعات القانونية الناجمة عن إخلاء شقته دون مراجعة الطرف الأول لإجراء اللازم."),
+        ("renewal", "To refund the deposit second party should submit the original receipt within maximum period of three months from the disconnection date and the issuance of the final invoice and clearance by the first party.",
+                    "لاسترجاع التأمين على الطرف الثاني إحضار إيصال التأمين الأصلي خلال ثلاثة أشهر كحد أقصى من تاريخ القطع وإصدار الفاتورة النهائية."),
+        ("liability", "The second party bear the full responsibility for any damage resulting from the storage or usage of gas cylinders or misuse of the gas connection.",
+                      "يتحمل الطرف الثاني المسؤولية كاملة عن أي ضرر قد ينجم عن تخزين أو إستعمال أسطوانات الغاز أو عن سوء استعماله لتوصيلة الغاز."),
+        ("liability", "The First party's responsibility is limited by the insurance policy covering gas system.",
+                      "إن مسؤولية الطرف الأول محدودة ببوليصة التأمين الخاصة بنظام الغاز المركزي."),
+        ("payment", "The First party reserves the right to change the gas price and charges according to market price from main supplier without prior notice.",
+                    "يحق للطرف الأول تغيير سعر الغاز حسب السعر المتداول من المصدر الرئيسي وكذلك رسوم الخدمة بدون سابق إشعار."),
+        ("general", "This contract is issued and sign in two copies, one for each party to abide its conditions.",
+                    "حرر هذا العقد من نسختين وقد تسلم كل طرف نسخة للعمل بمقتضاها."),
+        ("dispute", "Dispute, which may arise between the two parties with regard of this agreement, shall be amicably solved. In case of non-settlement of the disputes, the UAE law will be applied.",
+                    "أي نزاع قد ينشأ بشأن هذا العقد يكون من اختصاص محاكم دولة الإمارات العربية المتحدة ما لم يتوصل الطرفان إلى حل ودي بينهما."),
+    };
+
+    private async Task SeedBilingualSupplyTermsAsync()
+    {
+        var tpl = await _db.ContractTerms.IgnoreQueryFilters().Where(t => t.ContractId == null && t.ContractType == "supply").ToListAsync();
+        if (tpl.Any(t => t.TextEn != null)) return; // already bilingual (or edited by the users)
+        var generic = new HashSet<string>(GenericSupplyTermsAr);
+        if (tpl.Any(t => t.IsActive && !generic.Contains(t.TextAr.Trim()))) return; // users added their own terms: leave them alone
+        foreach (var t in tpl) { t.IsActive = false; t.IsDefault = false; }
+        var n = 0;
+        foreach (var (cat, en, ar) in SupplyTermsBilingual)
+            _db.ContractTerms.Add(new ContractTerm { ContractType = "supply", Category = cat, TextAr = ar, TextEn = en, IsDefault = true, IsActive = true, SortOrder = (++n) * 10 });
+        await _db.SaveChangesAsync();
+    }
+
+    /// <summary>Fill the printed-document fields of the company once (only empty ones), from the company's current invoice and contract.</summary>
+    private async Task SeedCompanyPrintDefaultsAsync(long companyId)
+    {
+        var c = await _db.Companies.FirstOrDefaultAsync(x => x.Id == companyId);
+        if (c == null) return;
+        c.PoBox ??= "8217";
+        c.Fax ??= "02 6778897";
+        c.Phone ??= "02 6778889";
+        c.CustomerCarePhone ??= "026778889";
+        c.Email ??= "info@binsidragas.com";
+        c.Website ??= "www.binsidragas.com";
+        c.Trn ??= "100377785900003";
+        c.InvoicePaymentNote ??= "Online (www.binsidragas.com), cash payment through our collectors (Fee AED 15) or our office. For details Call Customer Care Helpline";
+        c.SignatoryNameEn ??= "KHALID KHAMIS BIN SIDRA";
+        c.SignatoryNameAr ??= "خالد خميس بن سدرة";
+        c.SignatoryTitleEn ??= "General Manager";
+        c.SignatoryTitleAr ??= "مدير عام المؤسسة";
         await _db.SaveChangesAsync();
     }
 

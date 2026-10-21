@@ -896,6 +896,15 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("opening_journal_id");
 
+                    b.Property<bool>("ShowOnInvoice")
+                        .HasColumnType("bit")
+                        .HasColumnName("show_on_invoice");
+
+                    b.Property<string>("SwiftCode")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)")
+                        .HasColumnName("swift_code");
+
                     b.Property<DateTimeOffset?>("UpdatedAt")
                         .HasColumnType("datetimeoffset")
                         .HasColumnName("updated_at");
@@ -2009,6 +2018,16 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("base_currency_id");
 
+                    b.Property<string>("CashContactMobile")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("cash_contact_mobile");
+
+                    b.Property<string>("CashContactName")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)")
+                        .HasColumnName("cash_contact_name");
+
                     b.Property<string>("Code")
                         .IsRequired()
                         .HasMaxLength(20)
@@ -2025,10 +2044,25 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("created_by");
 
+                    b.Property<string>("CustomerCarePhone")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("customer_care_phone");
+
                     b.Property<string>("Email")
                         .HasMaxLength(150)
                         .HasColumnType("nvarchar(150)")
                         .HasColumnName("email");
+
+                    b.Property<string>("Fax")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("fax");
+
+                    b.Property<string>("InvoicePaymentNote")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)")
+                        .HasColumnName("invoice_payment_note");
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("bit")
@@ -2037,6 +2071,11 @@ namespace SedraPetrol.Api.Migrations
                     b.Property<bool>("IsDeleted")
                         .HasColumnType("bit")
                         .HasColumnName("is_deleted");
+
+                    b.Property<string>("LetterheadPath")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)")
+                        .HasColumnName("letterhead_path");
 
                     b.Property<string>("LogoDarkPath")
                         .HasMaxLength(500)
@@ -2064,6 +2103,31 @@ namespace SedraPetrol.Api.Migrations
                         .HasMaxLength(30)
                         .HasColumnType("nvarchar(30)")
                         .HasColumnName("phone");
+
+                    b.Property<string>("PoBox")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("po_box");
+
+                    b.Property<string>("SignatoryNameAr")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)")
+                        .HasColumnName("signatory_name_ar");
+
+                    b.Property<string>("SignatoryNameEn")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)")
+                        .HasColumnName("signatory_name_en");
+
+                    b.Property<string>("SignatoryTitleAr")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)")
+                        .HasColumnName("signatory_title_ar");
+
+                    b.Property<string>("SignatoryTitleEn")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)")
+                        .HasColumnName("signatory_title_en");
 
                     b.Property<string>("StampPath")
                         .HasMaxLength(500)

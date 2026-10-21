@@ -59,6 +59,13 @@ public partial class BankAccount : AuditableEntity
     [Column("notes"), MaxLength(500)]
     public string? Notes { get; set; }
 
+    [Column("swift_code"), MaxLength(20)]
+    public string? SwiftCode { get; set; }
+
+    /// <summary>Printed on customer invoices as "Payment by bank transfer".</summary>
+    [Column("show_on_invoice")]
+    public bool ShowOnInvoice { get; set; }
+
     [ForeignKey(nameof(BranchId)), JsonIgnore]
     public Branch? Branch { get; set; }
 

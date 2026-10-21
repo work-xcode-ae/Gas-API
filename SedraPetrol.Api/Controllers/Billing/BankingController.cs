@@ -19,7 +19,8 @@ public class BankingController : ApiControllerBase
     private static readonly string[] AccountTypes = { "cash", "bank", "petty_cash" };
 
     public record AccountInput(long? BranchId, string NameAr, string? NameEn, string AccountType, string? BankName, string? AccountNo, string? Iban,
-        long? CurrencyId, long GlAccountId, decimal? OpeningBalance, DateOnly? OpeningDate, bool IsActive = true, string? Notes = null);
+        long? CurrencyId, long GlAccountId, decimal? OpeningBalance, DateOnly? OpeningDate, bool IsActive = true, string? Notes = null,
+        string? SwiftCode = null, bool ShowOnInvoice = false);
     public record OpeningEntryInput(long EquityAccountId, DateOnly? Date);
     public record MappingInput(string Method, long? ReceiptAccountId, long? PaymentAccountId);
     public record TransferInput(long? BranchId, DateOnly? Date, long FromAccountId, long ToAccountId, decimal Amount, decimal? Fees, long? FeesAccountId,
@@ -127,7 +128,7 @@ public class BankingController : ApiControllerBase
             {
                 r.A.Id, r.A.BranchId, branch = Loc(r.BrEn, r.BrAr), r.A.NameAr, r.A.NameEn, name = Loc(r.A.NameEn, r.A.NameAr), r.A.AccountType, r.A.BankName, r.A.AccountNo,
                 r.A.Iban, r.A.CurrencyId, currency = r.Cur ?? "AED", r.A.GlAccountId, glAccount = $"{r.AccountCode} {Loc(r.GlEn, r.GlAr)}", r.A.OpeningBalance, r.A.OpeningDate,
-                r.A.OpeningJournalId, r.A.IsActive, r.A.Notes, balance = b?.Bal ?? 0m, lastMovement = b?.Last,
+                r.A.OpeningJournalId, r.A.IsActive, r.A.Notes, r.A.SwiftCode, r.A.ShowOnInvoice, balance = b?.Bal ?? 0m, lastMovement = b?.Last,
                 receiptMethods, paymentMethods, unmatchedLines = unmatched.GetValueOrDefault(r.A.Id), reconciledUntil = lastRec.GetValueOrDefault(r.A.Id),
             };
         }));
@@ -215,6 +216,7 @@ public class BankingController : ApiControllerBase
         a.BankName = i.BankName?.Trim(); a.AccountNo = i.AccountNo?.Trim(); a.Iban = i.Iban?.Replace(" ", "").ToUpperInvariant();
         a.CurrencyId = i.CurrencyId; a.GlAccountId = i.GlAccountId; a.OpeningBalance = i.OpeningBalance ?? 0; a.OpeningDate = i.OpeningDate;
         a.IsActive = i.IsActive; a.Notes = i.Notes;
+        a.SwiftCode = string.IsNullOrWhiteSpace(i.SwiftCode) ? null : i.SwiftCode.Trim().ToUpperInvariant(); a.ShowOnInvoice = i.ShowOnInvoice;
     }
 
     /// <summary>Postable GL accounts for pickers (bank side, fees, equity, charges, interest).</summary>

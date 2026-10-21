@@ -12,7 +12,7 @@ namespace SedraPetrol.Api.Controllers;
 [PermissionModule("settings")]
 public class CompaniesController : CrudController<Company>
 {
-    /// <summary>Upload branding: kind = logo | logo_dark | stamp. Stores the file and saves its path on the company.</summary>
+    /// <summary>Upload branding: kind = logo | logo_dark | stamp | letterhead. Stores the file and saves its path on the company.</summary>
     [HttpPost("{id:long}/branding/{kind}")]
     [RequestSizeLimit(10_000_000)]
     public async Task<IActionResult> UploadBranding(long id, string kind, [FromForm] FileForm form)
@@ -25,7 +25,8 @@ public class CompaniesController : CrudController<Company>
             case "logo": c.LogoPath = path; break;
             case "logo_dark": c.LogoDarkPath = path; break;
             case "stamp": c.StampPath = path; break;
-            default: throw new AppException("kind must be logo, logo_dark or stamp.");
+            case "letterhead": c.LetterheadPath = path; break;
+            default: throw new AppException("kind must be logo, logo_dark, stamp or letterhead.");
         }
         await Db.SaveChangesAsync();
         return Ok(new { path, url = $"/api/files/{path}" });
