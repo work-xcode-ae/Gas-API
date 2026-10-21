@@ -408,7 +408,7 @@ public class BillingService
     /// own counter, so a meter replacement never mixes readings) × the per-m3 gas price, plus monthly fees.
     /// Returns null when there is nothing to bill.
     /// </summary>
-    public async Task<Invoice?> GenerateConsumptionInvoiceAsync(long contractId, DateOnly periodStart, DateOnly periodEnd, bool issue, bool includeMonthlyFees = true)
+    public async Task<Invoice?> GenerateConsumptionInvoiceAsync(long contractId, DateOnly periodStart, DateOnly periodEnd, bool issue, bool includeMonthlyFees = true, DateOnly? issueDate = null)
     {
         var c = await _db.SupplyContracts.AsNoTracking().FirstOrDefaultAsync(x => x.Id == contractId) ?? throw new NotFoundException("SupplyContract", contractId);
         var unit = await _db.Units.AsNoTracking().FirstAsync(u => u.Id == c.UnitId);
@@ -445,7 +445,7 @@ public class BillingService
         if (lines.Count == 0) return null;
 
         return await CreateInvoiceAsync(new InvoiceDraft(c.BranchId, c.TenantId, unit.BuildingId, c.Id, "gas_consumption", null,
-            DateOnly.FromDateTime(DateTime.Today), null, periodStart, periodEnd, null, null, lines, issue));
+            issueDate ?? DateOnly.FromDateTime(DateTime.Today), null, periodStart, periodEnd, null, null, lines, issue));
     }
 
     // ------------------------------------------------------------------ A/P

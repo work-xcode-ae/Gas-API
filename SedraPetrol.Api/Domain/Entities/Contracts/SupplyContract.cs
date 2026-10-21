@@ -16,6 +16,31 @@ public partial class SupplyContract : Contract
     [Column("tenant_id")]
     public long TenantId { get; set; }
 
+    /// <summary>Service type (lookup CONTRACT_SERVICE_TYPE: VIP, night shift, contract delivery, walk in).</summary>
+    [Column("service_type_id")]
+    public long? ServiceTypeId { get; set; }
+
+    /// <summary>Residential / commercial (lookup CONTRACT_USAGE_TYPE).</summary>
+    [Column("usage_type_id")]
+    public long? UsageTypeId { get; set; }
+
+    /// <summary>How the customer receives the bills.</summary>
+    [Column("bill_by_email")]
+    public bool BillByEmail { get; set; }
+
+    [Column("bill_by_post")]
+    public bool BillByPost { get; set; }
+
+    /// <summary>One consumption invoice every N months (1 = monthly, 3 = quarterly …).</summary>
+    [Column("billing_cycle_months")]
+    public short? BillingCycleMonths { get; set; }
+
+    [ForeignKey(nameof(ServiceTypeId)), JsonIgnore]
+    public LookupValue? ServiceType { get; set; }
+
+    [ForeignKey(nameof(UsageTypeId)), JsonIgnore]
+    public LookupValue? UsageType { get; set; }
+
     [Column("deposit_amount")]
     [Precision(14, 2)]
     public decimal? DepositAmount { get; set; }

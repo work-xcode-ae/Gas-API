@@ -37,7 +37,9 @@ public class DataSeeder
         ("READING_METHOD", "Reading method", "طريقة القراءة", new[] { ("manual", "Manual", "يدوي"), ("remote", "Remote", "عن بعد"), ("customer", "Customer", "العميل"), ("photo", "Photo", "صورة") }),
         ("READING_TYPE", "Reading type", "نوع القراءة", new[] { ("opening", "Opening", "افتتاحية"), ("periodic", "Periodic", "دورية"), ("closing", "Closing", "ختامية"), ("replacement_out", "Replacement – old meter", "استبدال – العداد القديم"), ("replacement_in", "Replacement – new meter", "استبدال – العداد الجديد"), ("removal", "Meter removal", "فك العداد") }),
         ("CONTRACT_STATUS", "Contract status", "حالة العقد", new[] { ("draft", "Draft", "مسودة"), ("active", "Active", "نشط"), ("pending", "Pending", "معلق"), ("expired", "Expired", "منتهي"), ("terminated", "Terminated", "ملغي") }),
-        ("FEE_TYPE", "Fee type", "نوع الرسوم", new[] { ("gas_price", "Gas price (per m³)", "سعر الغاز (لكل م³)"), ("maintenance", "Maintenance", "صيانة"), ("connection", "Connection", "توصيل"), ("disconnection", "Disconnection", "فصل"), ("inspection", "Inspection", "فحص"), ("meter_rent", "Meter rent", "إيجار العداد"), ("insurance", "Insurance", "تأمين"), ("deposit", "Deposit", "تأمين نقدي"), ("gas_purchase", "Gas purchase", "شراء غاز"), ("other", "Other", "أخرى"), ("gov_fees", "Government fees (recharged)", "رسوم حكومية مستردة"), ("cd_service", "Civil Defense certificate service", "خدمة شهادة الدفاع المدني"), ("fixed_asset", "Fixed asset purchase", "شراء أصل ثابت") }),
+        ("FEE_TYPE", "Fee type", "نوع الرسوم", new[] { ("gas_price", "Gas price (per m³)", "سعر الغاز (لكل م³)"), ("maintenance", "Maintenance", "صيانة"), ("connection", "Connection", "توصيل"), ("disconnection", "Disconnection", "فصل"), ("inspection", "Inspection", "فحص"), ("meter_rent", "Meter rent", "إيجار العداد"), ("insurance", "Insurance", "تأمين"), ("deposit", "Deposit", "تأمين نقدي"), ("gas_purchase", "Gas purchase", "شراء غاز"), ("other", "Other", "أخرى"), ("gov_fees", "Government fees (recharged)", "رسوم حكومية مستردة"), ("cd_service", "Civil Defense certificate service", "خدمة شهادة الدفاع المدني"), ("fixed_asset", "Fixed asset purchase", "شراء أصل ثابت"), ("service", "Service charge", "رسوم الخدمة"), ("admin", "Administration charge", "رسوم إدارية") }),
+        ("CONTRACT_SERVICE_TYPE", "Contract service type", "نوع الخدمة", new[] { ("vip", "VIP", "VIP"), ("night_shift", "Night Shift", "وردية ليلية"), ("contract_delivery", "Contract Delivery", "توصيل العقد"), ("walk_in", "Walk In", "حضور شخصي") }),
+        ("CONTRACT_USAGE_TYPE", "Contract type", "نوع العقد", new[] { ("residential", "Residential", "سكني"), ("commercial", "Commercial", "تجاري") }),
         ("FEE_CYCLE", "Fee cycle", "دورة الرسوم", new[] { ("monthly", "Monthly", "شهري"), ("yearly", "Yearly", "سنوي"), ("one_time", "One time", "مرة واحدة"), ("per_m3", "Per m³", "لكل م³") }),
         ("INVOICE_TYPE", "Invoice type", "نوع الفاتورة", new[] { ("gas_consumption", "Gas consumption", "استهلاك غاز"), ("maintenance", "Maintenance", "صيانة"), ("deposit", "Deposit", "تأمين"), ("connection", "Connection", "توصيل"), ("other", "Other", "أخرى") }),
         ("INVOICE_STATUS", "Invoice status", "حالة الفاتورة", new[] { ("draft", "Draft", "مسودة"), ("pending", "Pending", "معلقة"), ("partial", "Partially paid", "مسددة جزئياً"), ("paid", "Paid", "مسددة"), ("overdue", "Overdue", "متأخرة"), ("cancelled", "Cancelled", "ملغاة") }),
@@ -92,6 +94,7 @@ public class DataSeeder
             await SeedTaxRatesAsync(companyId);
             await SeedOwnerBillingAsync(companyId);
             await SeedFixedAssetAccountingAsync(companyId);
+            await SeedServiceFeeMappingsAsync(companyId);
             await SeedChecklistsAsync();
             await SeedTermTemplatesAsync();
             await SeedBilingualSupplyTermsAsync();
@@ -405,6 +408,20 @@ public class DataSeeder
         var key = await _db.LookupValues.Where(v => v.LookupType!.Code == "FEE_TYPE" && v.Code == "fixed_asset").Select(v => (long?)v.Id).FirstOrDefaultAsync();
         if (key == null || await _db.AccountMappings.AnyAsync(m => m.CompanyId == companyId && m.SourceType == MappingSources.VendorBillItem && m.SourceKeyId == key)) return;
         _db.AccountMappings.Add(new AccountMapping { CompanyId = companyId, SourceType = MappingSources.VendorBillItem, SourceKeyId = key, DebitAccountId = acc.Id, IsActive = true });
+        await _db.SaveChangesAsync();
+    }
+
+    /// <summary>Monthly service and administration charges are service revenue (4103), like meter rent; added once, kept if changed.</summary>
+    private async Task SeedServiceFeeMappingsAsync(long companyId)
+    {
+        var revenue = await _db.Accounts.Where(a => a.CompanyId == companyId && a.AccountCode == "4103").Select(a => (long?)a.Id).FirstOrDefaultAsync();
+        if (revenue == null) return;
+        foreach (var code in new[] { "service", "admin" })
+        {
+            var key = await _db.LookupValues.Where(v => v.LookupType!.Code == "FEE_TYPE" && v.Code == code).Select(v => (long?)v.Id).FirstOrDefaultAsync();
+            if (key == null || await _db.AccountMappings.AnyAsync(m => m.CompanyId == companyId && m.SourceType == MappingSources.InvoiceItem && m.SourceKeyId == key)) continue;
+            _db.AccountMappings.Add(new AccountMapping { CompanyId = companyId, SourceType = MappingSources.InvoiceItem, SourceKeyId = key, CreditAccountId = revenue, IsActive = true });
+        }
         await _db.SaveChangesAsync();
     }
 

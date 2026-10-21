@@ -131,6 +131,10 @@ app.UseAuthorization();
 app.MapControllers();
 app.MapGet("/health", () => Results.Ok(new { status = "ok", time = DateTimeOffset.UtcNow })).AllowAnonymous();
 
+// demo buildings / tenants / invoices for presentations (Seed:DemoData = true); runs once, in the background, after the API is up
+if (cfg.GetValue<bool>("Seed:DemoData"))
+    app.Lifetime.ApplicationStarted.Register(() => _ = Task.Run(() => DemoDataSeeder.RunAsync(app)));
+
 app.Run();
 
 public partial class Program { }

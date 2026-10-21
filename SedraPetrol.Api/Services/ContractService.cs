@@ -56,6 +56,13 @@ public class ContractService
         public List<TermItemInput>? TermItems { get; init; }
         /// <summary>Create an invoice for the one-time fees (connection ...) and the unpaid deposit.</summary>
         public bool IssueInitialInvoice { get; init; }
+        /// <summary>CONTRACT_SERVICE_TYPE code (vip, night_shift, contract_delivery, walk_in).</summary>
+        public string? ServiceType { get; init; }
+        /// <summary>CONTRACT_USAGE_TYPE code (residential, commercial).</summary>
+        public string? UsageType { get; init; }
+        public bool BillByEmail { get; init; }
+        public bool BillByPost { get; init; }
+        public short? BillingCycleMonths { get; init; }
     }
 
     private readonly AppDbContext _db;
@@ -101,6 +108,9 @@ public class ContractService
             AutoRenew = i.AutoRenew, RenewalPeriodMonths = i.RenewalPeriodMonths,
             DepositAmount = i.DepositAmount, DepositPaid = i.DepositPaid, DepositDate = i.DepositDate, Terms = i.Terms,
             StatusId = await _lookups.IdAsync(LookupTypes.ContractStatus, statusCode), IsActive = active,
+            ServiceTypeId = string.IsNullOrWhiteSpace(i.ServiceType) ? null : await _lookups.IdAsync(LookupTypes.ContractServiceType, i.ServiceType.Trim()),
+            UsageTypeId = string.IsNullOrWhiteSpace(i.UsageType) ? null : await _lookups.IdAsync(LookupTypes.ContractUsageType, i.UsageType.Trim()),
+            BillByEmail = i.BillByEmail, BillByPost = i.BillByPost, BillingCycleMonths = i.BillingCycleMonths is > 0 ? i.BillingCycleMonths : null,
         };
         _db.SupplyContracts.Add(c);
         await _db.SaveChangesAsync();

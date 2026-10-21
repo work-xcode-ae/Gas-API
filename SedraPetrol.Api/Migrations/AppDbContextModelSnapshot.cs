@@ -7424,6 +7424,18 @@ namespace SedraPetrol.Api.Migrations
                 {
                     b.HasBaseType("SedraPetrol.Api.Domain.Entities.Contract");
 
+                    b.Property<bool>("BillByEmail")
+                        .HasColumnType("bit")
+                        .HasColumnName("bill_by_email");
+
+                    b.Property<bool>("BillByPost")
+                        .HasColumnType("bit")
+                        .HasColumnName("bill_by_post");
+
+                    b.Property<short?>("BillingCycleMonths")
+                        .HasColumnType("smallint")
+                        .HasColumnName("billing_cycle_months");
+
                     b.Property<decimal?>("DepositAmount")
                         .HasPrecision(14, 2)
                         .HasColumnType("decimal(14,2)")
@@ -7437,6 +7449,10 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bit")
                         .HasColumnName("deposit_paid");
 
+                    b.Property<long?>("ServiceTypeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("service_type_id");
+
                     b.Property<long>("TenantId")
                         .HasColumnType("bigint")
                         .HasColumnName("tenant_id");
@@ -7445,8 +7461,16 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("nvarchar(max)")
                         .HasColumnName("terms");
 
+                    b.Property<long?>("UsageTypeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("usage_type_id");
+
+                    b.HasIndex("ServiceTypeId");
+
                     b.HasIndex("TenantId")
                         .HasDatabaseName("ix_contract_supply_spec_tenant");
+
+                    b.HasIndex("UsageTypeId");
 
                     b.ToTable("contract_supply_spec", null, t =>
                         {
@@ -9699,13 +9723,27 @@ namespace SedraPetrol.Api.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.LookupValue", "ServiceType")
+                        .WithMany()
+                        .HasForeignKey("ServiceTypeId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("SedraPetrol.Api.Domain.Entities.Tenant", "Tenant")
                         .WithMany()
                         .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.LookupValue", "UsageType")
+                        .WithMany()
+                        .HasForeignKey("UsageTypeId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("ServiceType");
+
                     b.Navigation("Tenant");
+
+                    b.Navigation("UsageType");
                 });
 
             modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.AuditTrail", b =>

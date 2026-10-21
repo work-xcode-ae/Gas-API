@@ -13,6 +13,7 @@ public static class LookupTypes
         MeterType = "METER_TYPE", MeterStatus = "METER_STATUS", MeterServiceType = "METER_SERVICE_TYPE",
         MeterIssueType = "METER_ISSUE_TYPE", ServiceStatus = "SERVICE_STATUS", ReadingMethod = "READING_METHOD", ReadingType = "READING_TYPE",
         ContractStatus = "CONTRACT_STATUS", FeeType = "FEE_TYPE", FeeCycle = "FEE_CYCLE",
+        ContractServiceType = "CONTRACT_SERVICE_TYPE", ContractUsageType = "CONTRACT_USAGE_TYPE",
         InvoiceType = "INVOICE_TYPE", InvoiceStatus = "INVOICE_STATUS",
         PaymentMethod = "PAYMENT_METHOD", PaymentStatus = "PAYMENT_STATUS",
         PartyType = "PARTY_TYPE", ContactType = "CONTACT_TYPE", VendorType = "VENDOR_TYPE",

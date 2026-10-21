@@ -19,10 +19,11 @@ public class SupplyContractsController : ApiControllerBase
 
     public record UpdateInput(DateOnly? StartDate, DateOnly? EndDate, bool AutoRenew, short? RenewalPeriodMonths, decimal? DepositAmount,
         bool DepositPaid, DateOnly? DepositDate, string? Terms);
+    public record DetailsInput(string? ServiceType, string? UsageType, bool BillByEmail, bool BillByPost, short? BillingCycleMonths);
     public record TerminateInput(DateOnly? Date, string? Reason, decimal? ClosingReading, bool IssueFinalInvoice = false);
     public record ActivateInput(decimal? OpeningReading, DateTimeOffset? OpeningReadingDate);
     public record RenewInput(DateOnly? NewEndDate, int? Months);
-    public record GenerateInput(DateOnly PeriodStart, DateOnly PeriodEnd, bool Issue = true);
+    public record GenerateInput(DateOnly PeriodStart, DateOnly PeriodEnd, bool Issue = true, DateOnly? IssueDate = null);
 
     /// <summary>Contracts list (SupplyContractRecord). Filters: buildingId, tenantId, unitId, status, expiringInDays.</summary>
     [HttpGet]
@@ -59,9 +60,13 @@ public class SupplyContractsController : ApiControllerBase
             .Select(i => new { i.Id, i.InvoiceNo, i.IssueDate, i.DueDate, i.TotalAmount, i.StatusId, i.InvoiceTypeId, i.BillingPeriodStart, i.BillingPeriodEnd }).ToListAsync(ct);
         var terms = await Db.ContractTerms.AsNoTracking().Where(t => t.ContractType == "supply" && t.ContractId == id).OrderBy(t => t.SortOrder).ThenBy(t => t.Id)
             .Select(t => new { t.Id, templateId = t.SourceId, t.Category, text = t.TextAr, t.IsCustom, t.IsModified }).ToListAsync(ct);
+        var det = await Db.SupplyContracts.AsNoTracking().Where(c => c.Id == id)
+            .Select(c => new { c.ServiceTypeId, c.UsageTypeId, c.BillByEmail, c.BillByPost, c.BillingCycleMonths }).FirstAsync(ct);
         return Ok(new
         {
             contract = dto,
+            details = new { serviceType = Code(det.ServiceTypeId), serviceTypeLabel = Label(det.ServiceTypeId), usageType = Code(det.UsageTypeId), usageTypeLabel = Label(det.UsageTypeId),
+                            det.BillByEmail, det.BillByPost, det.BillingCycleMonths },
             terms,
             fees = fees.Select(f => new { f.Id, type = Code(f.FeeTypeId), typeLabel = Label(f.FeeTypeId), cycle = Code(f.CycleId), cycleLabel = Label(f.CycleId),
                                           f.Amount, f.EffectiveFrom, f.EffectiveTo, f.Notes, f.IsActive }),
@@ -90,6 +95,20 @@ public class SupplyContractsController : ApiControllerBase
         if (input.EndDate != null && input.EndDate < c.StartDate) throw new AppException("End date must be after the start date.");
         c.EndDate = input.EndDate; c.AutoRenew = input.AutoRenew; c.RenewalPeriodMonths = input.RenewalPeriodMonths;
         c.DepositAmount = input.DepositAmount; c.DepositPaid = input.DepositPaid; c.DepositDate = input.DepositDate; c.Terms = input.Terms;
+        await Db.SaveChangesAsync();
+        return NoContent();
+    }
+
+    /// <summary>Service type, contract type (residential / commercial), bill delivery and billing cycle.</summary>
+    [HttpPut("{id:long}/details")]
+    public async Task<IActionResult> SetDetails(long id, [FromBody] DetailsInput input)
+    {
+        var c = await Load(id);
+        c.ServiceTypeId = string.IsNullOrWhiteSpace(input.ServiceType) ? null : await LkId(LookupTypes.ContractServiceType, input.ServiceType.Trim());
+        c.UsageTypeId = string.IsNullOrWhiteSpace(input.UsageType) ? null : await LkId(LookupTypes.ContractUsageType, input.UsageType.Trim());
+        c.BillByEmail = input.BillByEmail; c.BillByPost = input.BillByPost;
+        c.BillingCycleMonths = input.BillingCycleMonths is > 0 ? input.BillingCycleMonths : null;
+        Activity.Log("supply_contract", c.Id, "update", $"Contract details updated – {c.ContractNo}", null, c.BranchId);
         await Db.SaveChangesAsync();
         return NoContent();
     }
@@ -226,7 +245,8 @@ public class SupplyContractsController : ApiControllerBase
     {
         await Load(id);
         await using var tx = await Db.Database.BeginTransactionAsync();
-        var inv = await Billing.GenerateConsumptionInvoiceAsync(id, input.PeriodStart, input.PeriodEnd, input.Issue);
+        if (input.IssueDate > Today) throw new AppException("The invoice date cannot be in the future.");
+        var inv = await Billing.GenerateConsumptionInvoiceAsync(id, input.PeriodStart, input.PeriodEnd, input.Issue, issueDate: input.IssueDate);
         await tx.CommitAsync();
         return inv == null ? Ok(new { created = false, message = "Nothing to bill for this period." }) : Ok(new { created = true, inv.Id, inv.InvoiceNo, inv.TotalAmount });
     }

@@ -153,6 +153,7 @@ public class PrintController : ApiControllerBase
             TPoBox = x.Tenant.Party!.PoBox, TEid = x.Tenant.Party!.EmiratesId, TCityEn = x.Tenant.Party!.City!.NameEn, TCityAr = x.Tenant.Party!.City!.NameAr,
             BCode = x.Building!.Code, BEn = x.Building.NameEn, BAr = x.Building.NameAr, BCityEn = x.Building.City!.NameEn, BCityAr = x.Building.City!.NameAr,
             UnitNo = x.Unit!.UnitNo, x.Unit.FloorNo,
+            x.ServiceTypeId, x.UsageTypeId, x.BillByEmail, x.BillByPost, x.BillingCycleMonths,
         }).FirstOrDefaultAsync(ct) ?? throw new NotFoundException("SupplyContract", id);
         EnsureBranchAccess(c.BranchId);
 
@@ -169,6 +170,8 @@ public class PrintController : ApiControllerBase
             {
                 c.Id, c.ContractNo, c.StartDate, c.EndDate, c.AutoRenew, renewalMonths = c.RenewalPeriodMonths, status = Code(c.StatusId), statusLabel = Label(c.StatusId),
                 deposit = c.DepositAmount ?? 0, notes = c.Terms, createdAt = c.CreatedAt,
+                serviceType = Code(c.ServiceTypeId), usageType = Code(c.UsageTypeId), billByEmail = c.BillByEmail, billByPost = c.BillByPost,
+                billingCycleMonths = c.BillingCycleMonths,
                 openingReading = opening?.ReadingValue, openingDate = opening == null ? (DateOnly?)null : DateOnly.FromDateTime(opening.ReadingDate.LocalDateTime),
             },
             tenant = new
@@ -181,6 +184,8 @@ public class PrintController : ApiControllerBase
             unitNo = c.UnitNo, floor = c.FloorNo, meterNo,
             fees = fees.Select(f => new { type = Code(f.FeeTypeId), typeLabel = Label(f.FeeTypeId), cycle = Code(f.CycleId), f.Amount, f.EffectiveFrom }),
             terms = await TermsAsync("supply", id, ct),
+            serviceTypes = await OptionsAsync(LookupTypes.ContractServiceType),
+            usageTypes = await OptionsAsync(LookupTypes.ContractUsageType),
             company = await CompanyAsync(),
         });
     }
@@ -233,6 +238,11 @@ public class PrintController : ApiControllerBase
             company = await CompanyAsync(),
         });
     }
+
+    /// <summary>Active values of a lookup list (for the ☐ / ☑ boxes of the printed form).</summary>
+    private async Task<List<object>> OptionsAsync(string type) =>
+        (await Lookups.AllAsync()).Values.Where(v => v.TypeCode == type && v.IsActive).OrderBy(v => v.SortOrder).ThenBy(v => v.Id)
+            .Select(v => (object)new { code = v.Code, nameEn = v.NameEn, nameAr = v.NameAr }).ToList();
 
     /// <summary>The contract's terms in Arabic and English (English from the term, or from its template when the text was not changed).</summary>
     private async Task<List<object>> TermsAsync(string type, long contractId, CancellationToken ct)
