@@ -40,7 +40,9 @@ public class PremisesController : ApiControllerBase
     /// </summary>
     public record ContractInput(DateOnly StartDate, DateOnly? EndDate, short? DurationMonths, decimal PricePerLitre, long? TaxRateId,
         short? PaymentTermsDays, long? SignatoryId, int? SignatoryIndex, string? SignedByName, DateOnly? SignedDate,
-        bool AutoRenew, short? RenewalPeriodMonths, string? Notes);
+        bool AutoRenew, short? RenewalPeriodMonths, string? Notes,
+        /// <summary>Terms &amp; conditions (Settings → «supply» terms, possibly reworded). NULL on update = keep the current terms.</summary>
+        List<ContractService.TermItemInput>? TermItems = null);
 
     public record VillaInput(long? BranchId, string? NameEn, string? NameAr, OwnerRef? Owner,
         long? CityId, string? Zone, string? Street, string? PoBox, string? Address, decimal? Latitude, decimal? Longitude,
@@ -406,6 +408,7 @@ public class PremisesController : ApiControllerBase
         EnsureBranchAccess(p.BranchId);
         if (await Db.DeliveryContracts.AnyAsync(c => c.PremisesId == id)) throw new BusinessRuleException("It has delivery contracts. Deactivate it instead.");
         if (await Db.PremisesRefillInvoices.AnyAsync(x => x.PremisesId == id)) throw new BusinessRuleException("It has refill invoices. Deactivate it instead.");
+        if (await Db.AmcContracts.AnyAsync(x => x.PremisesId == id)) throw new BusinessRuleException("It has maintenance contracts. Deactivate it instead.");
         var links = await Db.PremisesTanks.Where(l => l.PremisesId == id).ToListAsync();
         var tankIds = links.Select(l => l.TankId).ToList();
         if (await Db.RefillRequests.AnyAsync(r => tankIds.Contains(r.TankId))) throw new BusinessRuleException("Its tanks have refills. Deactivate it instead.");
@@ -607,6 +610,7 @@ public class PremisesController : ApiControllerBase
         var p = await Db.Premises.FirstAsync(x => x.Id == c.PremisesId);
         await ApplyContract(c, p, input, input.SignatoryId);
         await EnsureNoOverlap(c);
+        await HttpContext.RequestServices.GetRequiredService<ContractService>().SetTermsAsync(c.Id, input.TermItems);
         Activity.Log(p.PremisesType, p.Id, "update", $"{p.Code}: delivery contract {c.ContractNo} updated (price {c.PricePerLitre:0.####}/L)", p.BuildingId, p.BranchId);
         await Db.SaveChangesAsync();
         return NoContent();
@@ -642,6 +646,8 @@ public class PremisesController : ApiControllerBase
         await EnsureNoOverlap(c);
         Db.DeliveryContracts.Add(c);
         await Db.SaveChangesAsync();
+        // same terms table as the building gas supply contract (contract_type «supply», contract_id = contract.id)
+        await HttpContext.RequestServices.GetRequiredService<ContractService>().SetTermsAsync(c.Id, input.TermItems);
         return c;
     }
 
@@ -698,6 +704,10 @@ public class PremisesController : ApiControllerBase
             Litres = Db.PremisesRefillInvoices.Where(x => x.ContractId == c.Id).Sum(x => (decimal?)x.Litres) ?? 0,
         }).ToListAsync();
         if (!keepOrder) rows = rows.OrderByDescending(x => x.c.StartDate).ToList();
+        var ids = rows.Select(x => x.c.Id).ToList();
+        var terms = await Db.ContractTerms.AsNoTracking().Where(t => t.ContractType == "supply" && t.ContractId != null && ids.Contains(t.ContractId.Value))
+            .OrderBy(t => t.SortOrder).ThenBy(t => t.Id)
+            .Select(t => new { ContractId = t.ContractId!.Value, t.Id, t.SourceId, t.Category, t.TextAr, t.IsCustom, t.IsModified }).ToListAsync();
         return rows.Select(x => (object)new
         {
             x.c.Id, x.c.ContractNo, x.c.PremisesId, premisesCode = x.PCode, premisesType = x.PType, premises = Loc(x.PEn, x.PAr),
@@ -706,6 +716,7 @@ public class PremisesController : ApiControllerBase
             x.c.PricePerLitre, x.c.TaxRateId, taxCode = x.Tax, x.c.PaymentTermsDays,
             x.c.CustomerPartyId, customer = Loc(x.CustEn, x.CustAr), x.c.SignatoryId, x.c.SignedByName, x.c.SignedDate, x.c.Notes,
             invoicedTotal = x.Invoiced, invoicedLitres = x.Litres,
+            terms = terms.Where(t => t.ContractId == x.c.Id).Select(t => new { t.Id, templateId = t.SourceId, t.Category, text = t.TextAr, t.IsCustom, t.IsModified }),
         }).ToList();
     }
 

@@ -27,7 +27,8 @@ public class PremisesVisitsController : ApiControllerBase
     public async Task<IActionResult> Outcomes(long id)
     {
         var p = await Site(id);
-        var visits = await Db.MaintenanceVisits.AsNoTracking().Where(v => v.BuildingId == p.BuildingId)
+        var visits = await Db.MaintenanceVisits.AsNoTracking()
+            .Where(v => p.PremisesType == PremisesTypes.Restaurant ? v.AmcContract!.PremisesId == p.Id : v.BuildingId == p.BuildingId && v.AmcContract!.PremisesId == null)
             .Select(v => new { v.Id, v.StatusId, v.Notes, v.VisitDate, v.CompletedAt }).ToListAsync();
         var ids = visits.Select(v => v.Id).ToList();
         var logs = await Db.ActivityLogs.AsNoTracking()

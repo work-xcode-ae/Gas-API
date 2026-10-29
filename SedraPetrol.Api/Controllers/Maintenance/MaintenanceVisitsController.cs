@@ -34,11 +34,13 @@ public class MaintenanceVisitsController : ApiControllerBase
 
     [HttpGet]
     public async Task<IActionResult> List([FromQuery] PageQuery q, [FromQuery] long? buildingId, [FromQuery] long? amcContractId, [FromQuery] string? status,
-        [FromQuery] DateOnly? from, [FromQuery] DateOnly? to, CancellationToken ct)
+        [FromQuery] DateOnly? from, [FromQuery] DateOnly? to, [FromQuery] long? premisesId, CancellationToken ct)
     {
         await LoadLookups();
         var query = Db.MaintenanceVisits.AsNoTracking().Where(v => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(v.BranchId));
-        if (buildingId != null) query = query.Where(v => v.BuildingId == buildingId);
+        // visits of a restaurant's own AMC belong to the restaurant, not to its host building
+        if (premisesId != null) query = query.Where(v => v.AmcContract!.PremisesId == premisesId);
+        else if (buildingId != null) query = query.Where(v => v.BuildingId == buildingId && v.AmcContract!.PremisesId == null);
         if (amcContractId != null) query = query.Where(v => v.AmcContractId == amcContractId);
         if (from != null) query = query.Where(v => v.ScheduledDate >= from);
         if (to != null) query = query.Where(v => v.ScheduledDate <= to);

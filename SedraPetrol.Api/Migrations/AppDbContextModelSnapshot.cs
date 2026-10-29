@@ -7708,6 +7708,10 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("owner_party_id");
 
+                    b.Property<long?>("PremisesId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("premises_id");
+
                     b.Property<short?>("ResponseTimeHours")
                         .HasColumnType("smallint")
                         .HasColumnName("response_time_hours");
@@ -7725,6 +7729,9 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnName("visits_total");
 
                     b.HasIndex("OwnerPartyId");
+
+                    b.HasIndex("PremisesId")
+                        .HasDatabaseName("ix_contract_amc_spec_premises");
 
                     b.HasIndex("VendorId")
                         .HasDatabaseName("ix_contract_amc_spec_vendor");
@@ -10253,6 +10260,11 @@ namespace SedraPetrol.Api.Migrations
                         .HasForeignKey("OwnerPartyId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", "Premises")
+                        .WithMany()
+                        .HasForeignKey("PremisesId")
+                        .OnDelete(DeleteBehavior.NoAction);
+
                     b.HasOne("SedraPetrol.Api.Domain.Entities.Vendor", "Vendor")
                         .WithMany()
                         .HasForeignKey("VendorId")
@@ -10265,6 +10277,8 @@ namespace SedraPetrol.Api.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
 
                     b.Navigation("OwnerParty");
+
+                    b.Navigation("Premises");
 
                     b.Navigation("Vendor");
 

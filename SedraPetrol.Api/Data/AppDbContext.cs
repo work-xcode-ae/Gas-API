@@ -211,6 +211,8 @@ public partial class AppDbContext : DbContext
         mb.Entity<Contract>().HasIndex(e => e.UnitId).IsUnique().HasFilter("[unit_id] IS NOT NULL AND [is_active] = 1 AND " + NotDeleted).HasDatabaseName("ux_contract_active_unit");
         mb.Entity<SupplyContract>().HasIndex(e => e.TenantId).HasDatabaseName("ix_contract_supply_spec_tenant");
         mb.Entity<AmcContract>().HasIndex(e => e.VendorId).HasDatabaseName("ix_contract_amc_spec_vendor");
+        mb.Entity<AmcContract>().HasIndex(e => e.PremisesId).HasDatabaseName("ix_contract_amc_spec_premises");
+        mb.Entity<AmcContract>().HasOne(e => e.Premises).WithMany().HasForeignKey(e => e.PremisesId).OnDelete(DeleteBehavior.NoAction);
     }
 
     // ======================================================================

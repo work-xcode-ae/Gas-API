@@ -174,7 +174,7 @@ public class BuildingsController : ApiControllerBase
                 tenants = await Db.SupplyContracts.Where(c => c.IsActive && Db.Units.Any(u => u.Id == c.UnitId && u.BuildingId == id)).Select(c => c.TenantId).Distinct().CountAsync(ct),
                 openServiceRequests = await Db.ServiceRequests.CountAsync(r => r.BuildingId == id && r.StatusId != null && srOpen.Contains(r.StatusId.Value), ct),
                 activeRefills = await Db.RefillRequests.CountAsync(r => r.StatusId != completed && r.StatusId != cancelled && Db.Tanks.Any(t => t.Id == r.TankId && t.BuildingId == id), ct),
-                activeAmc = await Db.AmcContracts.CountAsync(a => a.BuildingId == id && a.StatusId == amcActive, ct),
+                activeAmc = await Db.AmcContracts.CountAsync(a => a.BuildingId == id && a.PremisesId == null && a.StatusId == amcActive, ct),
                 tankCapacity = tanks.Sum(t => t.CapacityLitres),
                 tankLevel = tanks.Sum(t => t.CurrentLevelLitres ?? 0),
                 tankLevelPct = tanks.Sum(t => t.CapacityLitres) > 0 ? Math.Round(tanks.Sum(t => t.CurrentLevelLitres ?? 0) / tanks.Sum(t => t.CapacityLitres) * 100, 1) : (decimal?)null,

@@ -19,15 +19,18 @@ public class AmcContractsController : ApiControllerBase
     public record AmcInput(long BuildingId, long? VendorId, long? OwnerPartyId, DateOnly StartDate, DateOnly EndDate, decimal? AnnualValue,
         string? VisitFrequency, short? VisitsTotal, short? ResponseTimeHours, bool EmergencyIncluded, string? Status, string? Notes,
         List<string>? Scope, List<string>? ExcludedScope, List<TermInput>? Terms, List<string>? CustomTerms, List<ScheduleInput>? PaymentSchedule,
-        bool GenerateVisits = true, bool AutoPaymentSchedule = true);
+        bool GenerateVisits = true, bool AutoPaymentSchedule = true, long? PremisesId = null);
     public record BillInput(string BillNo, DateOnly? BillDate, decimal? VatRate);
 
     [HttpGet]
-    public async Task<IActionResult> List([FromQuery] PageQuery q, [FromQuery] long? buildingId, [FromQuery] long? vendorId, [FromQuery] string? status, CancellationToken ct)
+    public async Task<IActionResult> List([FromQuery] PageQuery q, [FromQuery] long? buildingId, [FromQuery] long? vendorId, [FromQuery] string? status,
+        [FromQuery] long? premisesId, CancellationToken ct)
     {
         await LoadLookups();
         var query = Db.AmcContracts.AsNoTracking().Where(a => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(a.BranchId));
-        if (buildingId != null) query = query.Where(a => a.BuildingId == buildingId);
+        // a restaurant's own AMC is not an AMC of its host building
+        if (premisesId != null) query = query.Where(a => a.PremisesId == premisesId);
+        else if (buildingId != null) query = query.Where(a => a.BuildingId == buildingId && a.PremisesId == null);
         if (vendorId != null) query = query.Where(a => a.VendorId == vendorId);
         if (!string.IsNullOrEmpty(status)) { var s = await Lookups.IdOrNullAsync(LookupTypes.AmcStatus, status); query = query.Where(a => a.StatusId == s); }
         if (!string.IsNullOrWhiteSpace(q.Search)) query = query.Where(a => a.ContractNo.Contains(q.Search) || (a.Vendor!.Party!.NameAr ?? "").Contains(q.Search) || (a.Vendor.Party!.NameEn ?? "").Contains(q.Search));
@@ -50,9 +53,17 @@ public class AmcContractsController : ApiControllerBase
         var b = await Db.Buildings.FirstOrDefaultAsync(x => x.Id == input.BuildingId) ?? throw new NotFoundException("Building", input.BuildingId);
         EnsureBranchAccess(b.BranchId);
         Validate(input);
+        // restaurant AMC: linked to the restaurant (it is inside another building); a villa uses its own host building (PremisesId stays NULL)
+        long? premisesId = null; long? premisesOwner = null;
+        if (input.PremisesId != null)
+        {
+            var p = await Db.Premises.AsNoTracking().FirstOrDefaultAsync(x => x.Id == input.PremisesId) ?? throw new NotFoundException("Premises", input.PremisesId.Value);
+            if (p.BuildingId != b.Id) throw new AppException("The restaurant / villa is not in this building.");
+            if (p is Restaurant) { premisesId = p.Id; premisesOwner = p.OwnerPartyId; }
+        }
         await using var tx = await Db.Database.BeginTransactionAsync();
-        var a = new AmcContract { BranchId = b.BranchId, BuildingId = b.Id, ContractNo = await Numbers.NextAsync(NumberPrefixes.Amc, date: input.StartDate), IsActive = true };
-        await Apply(a, input);
+        var a = new AmcContract { BranchId = b.BranchId, BuildingId = b.Id, PremisesId = premisesId, ContractNo = await Numbers.NextAsync(NumberPrefixes.Amc, date: input.StartDate), IsActive = true };
+        await Apply(a, premisesOwner != null && input.OwnerPartyId == null ? input with { OwnerPartyId = premisesOwner } : input);
         Db.AmcContracts.Add(a);
         await Db.SaveChangesAsync();
         await ReplaceChildren(a, input, replaceSchedule: true);
@@ -81,7 +92,7 @@ public class AmcContractsController : ApiControllerBase
         var start = input.StartDate ?? a.EndDate!.Value.AddDays(1);
         var end = input.EndDate ?? start.AddYears(1).AddDays(-1);
         if (end <= start) throw new AppException("The end date must be after the start date.");
-        if (await Db.AmcContracts.AnyAsync(x => x.BuildingId == a.BuildingId && x.Id != id && x.IsActive && x.StartDate <= end && x.EndDate >= start))
+        if (await Db.AmcContracts.AnyAsync(x => x.BuildingId == a.BuildingId && x.PremisesId == a.PremisesId && x.Id != id && x.IsActive && x.StartDate <= end && x.EndDate >= start))
             throw new BusinessRuleException("Another active AMC contract already covers this period for the building.");
         var inc = await LkId(LookupTypes.ScopeItemType, "included");
         var scope = await Db.AmcScopeItems.AsNoTracking().Where(s => s.ContractId == id).ToListAsync();
@@ -92,7 +103,7 @@ public class AmcContractsController : ApiControllerBase
             scope.Where(s => s.ItemTypeId == inc).Select(s => s.Description).ToList(),
             scope.Where(s => s.ItemTypeId != inc).Select(s => s.Description).ToList(),
             terms.Select(t => new TermInput(t.Category, t.TextAr, t.SourceId)).ToList(),
-            null, null);
+            null, null, PremisesId: a.PremisesId);
         var result = await Create(renewed);
         Activity.Log("amc_contract", a.Id, "renew", $"AMC {a.ContractNo} renewed for {start:yyyy-MM-dd} → {end:yyyy-MM-dd}", a.BuildingId, a.BranchId);
         await Db.SaveChangesAsync();
@@ -356,6 +367,10 @@ public class AmcContractsController : ApiControllerBase
         var schedule = await Db.AmcPaymentSchedules.AsNoTracking().Where(s => ids.Contains(s.ContractId)).OrderBy(s => s.DueDate).ToListAsync();
         var visits = await Db.MaintenanceVisits.AsNoTracking().Where(v => ids.Contains(v.AmcContractId)).OrderBy(v => v.ScheduledDate).ToListAsync();
         var buildings = await Db.Buildings.AsNoTracking().Where(b => list.Select(a => a.BuildingId).Contains(b.Id)).ToDictionaryAsync(b => b.Id);
+        // restaurant AMCs: the restaurant; villa AMCs: the villa that owns the building (shown instead of a plain building)
+        var bIds = list.Select(a => a.BuildingId).ToList();
+        var sites = await Db.Premises.AsNoTracking().Where(p => list.Select(a => a.PremisesId).Contains(p.Id) || (p.PremisesType == PremisesTypes.Villa && bIds.Contains(p.BuildingId)))
+            .Select(p => new { p.Id, p.Code, p.NameEn, p.NameAr, p.PremisesType, p.BuildingId }).ToListAsync();
         var billing = HttpContext.RequestServices.GetRequiredService<BillingService>();
         var paidBills = await billing.PaidByBillAsync(schedule.Where(s => s.VendorBillId != null).Select(s => s.VendorBillId!.Value));
         var bills = await Db.VendorBills.AsNoTracking().Where(b => schedule.Select(s => s.VendorBillId).Contains(b.Id)).ToDictionaryAsync(b => b.Id, b => b.TotalAmount ?? 0);
@@ -378,9 +393,11 @@ public class AmcContractsController : ApiControllerBase
             var done = mv.Where(x => Code(x.StatusId) == "completed").OrderBy(x => x.VisitDate ?? x.ScheduledDate).ToList();
             var next = mv.Where(x => Code(x.StatusId) is "scheduled" or "in_progress" && x.ScheduledDate >= Today).OrderBy(x => x.ScheduledDate).FirstOrDefault();
             var b = buildings.GetValueOrDefault(a.BuildingId!.Value);
+            var site = a.PremisesId != null ? sites.FirstOrDefault(x => x.Id == a.PremisesId) : sites.FirstOrDefault(x => x.PremisesType == PremisesTypes.Villa && x.BuildingId == a.BuildingId);
             return (object)new
             {
-                a.Id, a.ContractNo, a.BuildingId, buildingCode = b?.Code, building = Loc(b?.NameEn, b?.NameAr),
+                a.Id, a.ContractNo, a.BuildingId, buildingCode = b?.Code, building = Loc(b?.NameEn, b?.NameAr), a.PremisesId,
+                siteId = site?.Id, siteType = site?.PremisesType, siteCode = site?.Code, site = site == null ? null : Loc(site.NameEn, site.NameAr),
                 vendorId = a.VendorId, vendor = Loc(v?.Party!.NameEn, v?.Party!.NameAr), vendorContact = vc == null ? v?.Party!.Phone : $"{Loc(vc.NameEn, vc.NameAr)} {vc.Phone}".Trim(),
                 vendorEmail = vc?.Email ?? v?.Party!.Email, ownerPartyId = a.OwnerPartyId, ownerName = Loc(p?.NameEn, p?.NameAr),
                 ownerPhone = pcs.FirstOrDefault(c => c.ContactTypeId != emailType)?.Value, ownerEmail = pcs.FirstOrDefault(c => c.ContactTypeId == emailType)?.Value,

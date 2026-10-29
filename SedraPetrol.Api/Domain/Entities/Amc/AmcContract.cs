@@ -38,6 +38,11 @@ public partial class AmcContract : Contract
     [Column("emergency_included")]
     public bool EmergencyIncluded { get; set; }
 
+    /// <summary>Restaurant (premises) this AMC covers; NULL = the whole building (villas and normal buildings).
+    /// A restaurant sits inside another building, so its AMC must not count as the host building's AMC.</summary>
+    [Column("premises_id")]
+    public long? PremisesId { get; set; }
+
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(VendorId)), JsonIgnore]
     public Vendor? Vendor { get; set; }
@@ -47,4 +52,7 @@ public partial class AmcContract : Contract
 
     [ForeignKey(nameof(VisitFrequencyId)), JsonIgnore]
     public LookupValue? VisitFrequency { get; set; }
+
+    [ForeignKey(nameof(PremisesId)), JsonIgnore]
+    public Premises? Premises { get; set; }
 }

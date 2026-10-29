@@ -127,14 +127,18 @@ public class PremisesServiceController : ApiControllerBase
         return p;
     }
 
-    /// <summary>Active AMC of the site's building covering today; otherwise null + the reason (Arabic, shown to the user).</summary>
+    /// <summary>Active AMC of the site (restaurant: its own; villa: its building) covering today; otherwise null + the reason (Arabic, shown to the user).</summary>
     private async Task<(AmcContract? Contract, string? Reason)> ValidAmc(Premises p)
     {
         var active = await Lookups.IdOrNullAsync(LookupTypes.AmcStatus, "active");
-        var all = await Db.AmcContracts.AsNoTracking().Where(a => a.BuildingId == p.BuildingId).OrderByDescending(a => a.EndDate).ToListAsync();
+        // restaurant → its own AMC (premises_id); villa → the AMC of its own host building
+        var q = p.PremisesType == PremisesTypes.Restaurant
+            ? Db.AmcContracts.AsNoTracking().Where(a => a.PremisesId == p.Id)
+            : Db.AmcContracts.AsNoTracking().Where(a => a.BuildingId == p.BuildingId && a.PremisesId == null);
+        var all = await q.OrderByDescending(a => a.EndDate).ToListAsync();
         var ok = all.FirstOrDefault(a => a.IsActive && a.StatusId == active && a.StartDate <= Today && (a.EndDate == null || a.EndDate >= Today));
         if (ok != null) return (ok, null);
-        var what = p.PremisesType == PremisesTypes.Villa ? "للفيلا" : "للمبنى الذي يقع فيه المطعم";
+        var what = p.PremisesType == PremisesTypes.Villa ? "للفيلا" : "للمطعم";
         if (all.Count == 0) return (null, $"لا يوجد عقد صيانة {what}. أضف عقد صيانة (AMC) ساري أولاً.");
         var future = all.FirstOrDefault(a => a.IsActive && a.StatusId == active && a.StartDate > Today);
         if (future != null) return (null, $"عقد الصيانة {future.ContractNo} يبدأ في {future.StartDate:yyyy-MM-dd} — لا يمكن فتح طلب خدمة قبل بدايته.");

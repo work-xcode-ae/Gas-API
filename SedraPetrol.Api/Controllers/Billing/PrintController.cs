@@ -190,6 +190,66 @@ public class PrintController : ApiControllerBase
         });
     }
 
+    // ═════════════════════════ villa / restaurant gas contract (price per litre) ═════════════════════════
+
+    /// <summary>Gas supply contract of a villa or a restaurant (delivery contract): owner, site, tanks, price per litre, terms, signatures.</summary>
+    [HttpGet("delivery-contract/{id:long}")]
+    [RequirePermission("contracts.view")]
+    public async Task<IActionResult> DeliveryContract(long id, CancellationToken ct)
+    {
+        await LoadLookups();
+        var c = await Db.DeliveryContracts.AsNoTracking().Where(x => x.Id == id).Select(x => new
+        {
+            x.Id, x.BranchId, x.ContractNo, x.StartDate, x.EndDate, x.AutoRenew, x.RenewalPeriodMonths, x.StatusId, x.Notes, x.CreatedAt,
+            x.PricePerLitre, x.PaymentTermsDays, x.SignedByName, x.SignedDate, x.PremisesId, x.CustomerPartyId,
+            TaxCode = x.TaxRate != null ? x.TaxRate.Code : null, TaxRate = x.TaxRate != null ? (decimal?)x.TaxRate.Rate : null,
+            SigEn = x.Signatory != null ? x.Signatory.NameEn : null, SigAr = x.Signatory != null ? x.Signatory.NameAr : null,
+            SigPos = x.Signatory != null ? x.Signatory.Position : null, SigEid = x.Signatory != null ? x.Signatory.EmiratesId : null,
+            CEn = x.CustomerParty!.NameEn, CAr = x.CustomerParty.NameAr, CCode = x.CustomerParty.PartyCode, CPhone = x.CustomerParty.Phone, CEmail = x.CustomerParty.Email,
+            CPoBox = x.CustomerParty.PoBox, CEid = x.CustomerParty.EmiratesId, CTl = x.CustomerParty.TradeLicenseNo, CTrn = x.CustomerParty.TaxNumber,
+            CCityEn = x.CustomerParty.City!.NameEn, CCityAr = x.CustomerParty.City!.NameAr,
+            PCode = x.Premises!.Code, PType = x.Premises.PremisesType, PEn = x.Premises.NameEn, PAr = x.Premises.NameAr,
+            BCode = x.Premises.Building!.Code, BEn = x.Premises.Building.NameEn, BAr = x.Premises.Building.NameAr, BStreet = x.Premises.Building.Street,
+            BZone = x.Premises.Building.Zone, BAddress = x.Premises.Building.Address, BCityEn = x.Premises.Building.City!.NameEn, BCityAr = x.Premises.Building.City!.NameAr,
+            UnitNo = x.Premises.Unit != null ? x.Premises.Unit.UnitNo : null,
+        }).FirstOrDefaultAsync(ct) ?? throw new NotFoundException("DeliveryContract", id);
+        EnsureBranchAccess(c.BranchId);
+
+        var villa = await Db.Villas.AsNoTracking().Where(v => v.Id == c.PremisesId).Select(v => new { v.Community, v.PlotNo, v.VillaNo, v.MakaniNo }).FirstOrDefaultAsync(ct);
+        var rest = await Db.Restaurants.AsNoTracking().Where(r => r.Id == c.PremisesId).Select(r => new { r.TradeName, r.TradeLicenseNo, r.TradeLicenseExpiry }).FirstOrDefaultAsync(ct);
+        var contacts = await Db.PartyContacts.AsNoTracking().Where(p => p.PartyId == c.CustomerPartyId)
+            .OrderByDescending(p => p.IsDefault).Select(p => new { p.ContactTypeId, p.Value }).ToListAsync(ct);
+        var tanks = await Db.PremisesTanks.AsNoTracking().Where(l => l.PremisesId == c.PremisesId)
+            .Select(l => new { l.Tank!.TankNo, l.Tank.CapacityLitres, Gas = l.Tank.GasType!.Code }).ToListAsync(ct);
+
+        return Ok(new
+        {
+            contract = new
+            {
+                c.Id, c.ContractNo, c.StartDate, c.EndDate, c.AutoRenew, renewalMonths = c.RenewalPeriodMonths, status = Code(c.StatusId), statusLabel = Label(c.StatusId),
+                pricePerLitre = c.PricePerLitre, taxCode = c.TaxCode, taxRate = c.TaxRate, paymentTermsDays = c.PaymentTermsDays,
+                signedByName = c.SignedByName, signedDate = c.SignedDate, notes = c.Notes, createdAt = c.CreatedAt,
+            },
+            customer = new
+            {
+                code = c.CCode, nameEn = c.CEn, nameAr = c.CAr, phone = c.CPhone, email = c.CEmail, poBox = c.CPoBox, emiratesId = c.CEid,
+                tradeLicenseNo = c.CTl, trn = c.CTrn, cityEn = c.CCityEn, cityAr = c.CCityAr,
+                contacts = contacts.Select(p => new { type = Code(p.ContactTypeId), p.Value }),
+            },
+            site = new
+            {
+                type = c.PType, code = c.PCode, nameEn = c.PEn, nameAr = c.PAr,
+                buildingCode = c.BCode, buildingEn = c.BEn, buildingAr = c.BAr, street = c.BStreet, zone = c.BZone, address = c.BAddress,
+                cityEn = c.BCityEn, cityAr = c.BCityAr, unitNo = c.UnitNo,
+                community = villa?.Community, villa?.PlotNo, villa?.VillaNo, villa?.MakaniNo, rest?.TradeName, rest?.TradeLicenseNo, rest?.TradeLicenseExpiry,
+            },
+            signatory = c.SigEn == null && c.SigAr == null ? null : new { nameEn = c.SigEn, nameAr = c.SigAr, position = c.SigPos, emiratesId = c.SigEid },
+            tanks,
+            terms = await TermsAsync("supply", id, ct),
+            company = await CompanyAsync(),
+        });
+    }
+
     // ═════════════════════════ annual maintenance contract ═════════════════════════
 
     [HttpGet("amc-contract/{id:long}")]
