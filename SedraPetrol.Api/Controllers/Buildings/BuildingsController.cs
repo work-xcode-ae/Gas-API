@@ -35,7 +35,7 @@ public class BuildingsController : ApiControllerBase
     /// <summary>Buildings table with occupancy, meters, tank level and open requests.</summary>
     [HttpGet]
     public async Task<ActionResult<PagedResult<BuildingListItem>>> List([FromQuery] PageQuery q, [FromQuery] long? branchId,
-        [FromQuery] string? status, [FromQuery] string? type, [FromQuery] long? cityId, CancellationToken ct)
+        [FromQuery] string? status, [FromQuery] string? type, [FromQuery] long? cityId, [FromQuery] string? kind, CancellationToken ct)
     {
         await LoadLookups();
         var query = Scoped(Db.Buildings.AsNoTracking());
@@ -43,6 +43,11 @@ public class BuildingsController : ApiControllerBase
         if (cityId != null) query = query.Where(b => b.CityId == cityId);
         if (!string.IsNullOrEmpty(status)) { var sid = await Lookups.IdOrNullAsync(LookupTypes.BuildingStatus, status); query = query.Where(b => b.StatusId == sid); }
         if (!string.IsNullOrEmpty(type)) { var tid = await Lookups.IdOrNullAsync(LookupTypes.BuildingType, type); query = query.Where(b => b.BuildingTypeId == tid); }
+        // Restaurants & Villas (approved 24 Oct 2026): optional filter; without "kind" the list is exactly as before.
+        // villa = villa buildings, restaurant = buildings that have restaurants, building = everything except villas.
+        if (kind == "villa") query = query.Where(b => Db.Premises.Any(p => p.BuildingId == b.Id && p.PremisesType == PremisesTypes.Villa));
+        else if (kind == "restaurant") query = query.Where(b => Db.Premises.Any(p => p.BuildingId == b.Id && p.PremisesType == PremisesTypes.Restaurant));
+        else if (kind == "building") query = query.Where(b => !Db.Premises.Any(p => p.BuildingId == b.Id && p.PremisesType == PremisesTypes.Villa));
         if (!string.IsNullOrWhiteSpace(q.Search))
         {
             var s = q.Search.Trim();

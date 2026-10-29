@@ -147,6 +147,7 @@ public partial class AppDbContext : DbContext
         ConfigureContracts(modelBuilder);
         ConfigureAssets(modelBuilder);
         ConfigureIndexes(modelBuilder);
+        ConfigurePremises(modelBuilder);   // Restaurants & Villas (new tables only) — see AppDbContext.Premises.cs
         // Note: non-nullable defaults (is_active = true, vat_rate = 5 ...) are set by property initialisers
         // in the entity classes. A database DEFAULT on a bool would make EF skip an explicit "false" on insert.
     }

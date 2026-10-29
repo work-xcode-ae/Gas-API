@@ -5178,6 +5178,324 @@ namespace SedraPetrol.Api.Migrations
                     b.ToTable("permission");
                 });
 
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.Premises", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<long>("BranchId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("branch_id");
+
+                    b.Property<long>("BuildingId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("building_id");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)")
+                        .HasColumnName("code");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("SYSDATETIMEOFFSET()");
+
+                    b.Property<long?>("CreatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("created_by");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit")
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("NameAr")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .HasColumnName("name_ar");
+
+                    b.Property<string>("NameEn")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .HasColumnName("name_en");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)")
+                        .HasColumnName("notes");
+
+                    b.Property<long>("OwnerPartyId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("owner_party_id");
+
+                    b.Property<string>("PremisesType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)")
+                        .HasColumnName("premises_type");
+
+                    b.Property<long?>("UnitId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("unit_id");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long?>("UpdatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BranchId");
+
+                    b.HasIndex("Code")
+                        .IsUnique()
+                        .HasDatabaseName("ux_premises_code");
+
+                    b.HasIndex("OwnerPartyId")
+                        .HasDatabaseName("ix_premises_owner");
+
+                    b.HasIndex("UnitId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_premises_unit")
+                        .HasFilter("[unit_id] IS NOT NULL AND [is_deleted] = 0");
+
+                    b.HasIndex("BuildingId", "PremisesType")
+                        .HasDatabaseName("ix_premises_building_type");
+
+                    b.ToTable("premises", (string)null);
+
+                    b.UseTptMappingStrategy();
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.PremisesRefillInvoice", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(14, 2)
+                        .HasColumnType("decimal(14,2)")
+                        .HasColumnName("amount");
+
+                    b.Property<long>("ContractId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("contract_id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("SYSDATETIMEOFFSET()");
+
+                    b.Property<long?>("CreatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("created_by");
+
+                    b.Property<long>("InvoiceId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("invoice_id");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<decimal>("Litres")
+                        .HasPrecision(14, 3)
+                        .HasColumnType("decimal(14,3)")
+                        .HasColumnName("litres");
+
+                    b.Property<long>("PremisesId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("premises_id");
+
+                    b.Property<decimal>("PricePerLitre")
+                        .HasPrecision(14, 4)
+                        .HasColumnType("decimal(14,4)")
+                        .HasColumnName("price_per_litre");
+
+                    b.Property<long>("RefillRequestId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("refill_request_id");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long?>("UpdatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ContractId");
+
+                    b.HasIndex("InvoiceId")
+                        .HasDatabaseName("ix_premises_refill_invoice_invoice");
+
+                    b.HasIndex("PremisesId")
+                        .HasDatabaseName("ix_premises_refill_invoice_premises");
+
+                    b.HasIndex("RefillRequestId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_premises_refill_invoice_refill")
+                        .HasFilter("[is_deleted] = 0");
+
+                    b.ToTable("premises_refill_invoice");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.PremisesSignatory", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<bool>("CanSignContracts")
+                        .HasColumnType("bit")
+                        .HasColumnName("can_sign_contracts");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("SYSDATETIMEOFFSET()");
+
+                    b.Property<long?>("CreatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("Email")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)")
+                        .HasColumnName("email");
+
+                    b.Property<string>("EmiratesId")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("emirates_id");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit")
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("NameAr")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .HasColumnName("name_ar");
+
+                    b.Property<string>("NameEn")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .HasColumnName("name_en");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)")
+                        .HasColumnName("notes");
+
+                    b.Property<string>("Phone")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("phone");
+
+                    b.Property<string>("Position")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)")
+                        .HasColumnName("position");
+
+                    b.Property<long>("PremisesId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("premises_id");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long?>("UpdatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PremisesId")
+                        .HasDatabaseName("ix_premises_signatory_premises");
+
+                    b.ToTable("premises_signatory");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.PremisesTank", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("SYSDATETIMEOFFSET()");
+
+                    b.Property<long?>("CreatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("created_by");
+
+                    b.Property<bool>("IsDeleted")
+                        .HasColumnType("bit")
+                        .HasColumnName("is_deleted");
+
+                    b.Property<long>("PremisesId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("premises_id");
+
+                    b.Property<long>("TankId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("tank_id");
+
+                    b.Property<DateTimeOffset?>("UpdatedAt")
+                        .HasColumnType("datetimeoffset")
+                        .HasColumnName("updated_at");
+
+                    b.Property<long?>("UpdatedBy")
+                        .HasColumnType("bigint")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PremisesId")
+                        .HasDatabaseName("ix_premises_tank_premises");
+
+                    b.HasIndex("TankId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_premises_tank_tank")
+                        .HasFilter("[is_deleted] = 0");
+
+                    b.ToTable("premises_tank");
+                });
+
             modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.RefillCollection", b =>
                 {
                     b.Property<long>("Id")
@@ -7420,6 +7738,61 @@ namespace SedraPetrol.Api.Migrations
                         });
                 });
 
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.DeliveryContract", b =>
+                {
+                    b.HasBaseType("SedraPetrol.Api.Domain.Entities.Contract");
+
+                    b.Property<long>("CustomerPartyId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("customer_party_id");
+
+                    b.Property<short?>("PaymentTermsDays")
+                        .HasColumnType("smallint")
+                        .HasColumnName("payment_terms_days");
+
+                    b.Property<long>("PremisesId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("premises_id");
+
+                    b.Property<decimal>("PricePerLitre")
+                        .HasPrecision(14, 4)
+                        .HasColumnType("decimal(14,4)")
+                        .HasColumnName("price_per_litre");
+
+                    b.Property<long?>("SignatoryId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("signatory_id");
+
+                    b.Property<string>("SignedByName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .HasColumnName("signed_by_name");
+
+                    b.Property<DateOnly?>("SignedDate")
+                        .HasColumnType("date")
+                        .HasColumnName("signed_date");
+
+                    b.Property<long?>("TaxRateId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("tax_rate_id");
+
+                    b.HasIndex("CustomerPartyId")
+                        .HasDatabaseName("ix_contract_delivery_spec_customer");
+
+                    b.HasIndex("PremisesId")
+                        .HasDatabaseName("ix_contract_delivery_spec_premises");
+
+                    b.HasIndex("SignatoryId");
+
+                    b.HasIndex("TaxRateId");
+
+                    b.ToTable("contract_delivery_spec", null, t =>
+                        {
+                            t.Property("Id")
+                                .HasColumnName("contract_id");
+                        });
+                });
+
             modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.SupplyContract", b =>
                 {
                     b.HasBaseType("SedraPetrol.Api.Domain.Entities.Contract");
@@ -7476,6 +7849,90 @@ namespace SedraPetrol.Api.Migrations
                         {
                             t.Property("Id")
                                 .HasColumnName("contract_id");
+                        });
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.Restaurant", b =>
+                {
+                    b.HasBaseType("SedraPetrol.Api.Domain.Entities.Premises");
+
+                    b.Property<int?>("BurnersCount")
+                        .HasColumnType("int")
+                        .HasColumnName("burners_count");
+
+                    b.Property<string>("Cuisine")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)")
+                        .HasColumnName("cuisine");
+
+                    b.Property<long?>("KitchenTypeId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("kitchen_type_id");
+
+                    b.Property<string>("OperatingHours")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)")
+                        .HasColumnName("operating_hours");
+
+                    b.Property<int?>("SeatingCapacity")
+                        .HasColumnType("int")
+                        .HasColumnName("seating_capacity");
+
+                    b.Property<DateOnly?>("TradeLicenseExpiry")
+                        .HasColumnType("date")
+                        .HasColumnName("trade_license_expiry");
+
+                    b.Property<string>("TradeLicenseNo")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)")
+                        .HasColumnName("trade_license_no");
+
+                    b.Property<string>("TradeName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)")
+                        .HasColumnName("trade_name");
+
+                    b.HasIndex("KitchenTypeId");
+
+                    b.ToTable("premises_restaurant_spec", null, t =>
+                        {
+                            t.Property("Id")
+                                .HasColumnName("premises_id");
+                        });
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.Villa", b =>
+                {
+                    b.HasBaseType("SedraPetrol.Api.Domain.Entities.Premises");
+
+                    b.Property<short?>("Bedrooms")
+                        .HasColumnType("smallint")
+                        .HasColumnName("bedrooms");
+
+                    b.Property<string>("Community")
+                        .HasMaxLength(150)
+                        .HasColumnType("nvarchar(150)")
+                        .HasColumnName("community");
+
+                    b.Property<string>("MakaniNo")
+                        .HasMaxLength(30)
+                        .HasColumnType("nvarchar(30)")
+                        .HasColumnName("makani_no");
+
+                    b.Property<string>("PlotNo")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)")
+                        .HasColumnName("plot_no");
+
+                    b.Property<string>("VillaNo")
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)")
+                        .HasColumnName("villa_no");
+
+                    b.ToTable("premises_villa_spec", null, t =>
+                        {
+                            t.Property("Id")
+                                .HasColumnName("premises_id");
                         });
                 });
 
@@ -8928,6 +9385,105 @@ namespace SedraPetrol.Api.Migrations
                     b.Navigation("Payment");
                 });
 
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.Premises", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Branch", "Branch")
+                        .WithMany()
+                        .HasForeignKey("BranchId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Building", "Building")
+                        .WithMany()
+                        .HasForeignKey("BuildingId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Party", "OwnerParty")
+                        .WithMany()
+                        .HasForeignKey("OwnerPartyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Unit", "Unit")
+                        .WithMany()
+                        .HasForeignKey("UnitId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Branch");
+
+                    b.Navigation("Building");
+
+                    b.Navigation("OwnerParty");
+
+                    b.Navigation("Unit");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.PremisesRefillInvoice", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.DeliveryContract", "Contract")
+                        .WithMany()
+                        .HasForeignKey("ContractId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Invoice", "Invoice")
+                        .WithMany()
+                        .HasForeignKey("InvoiceId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", "Premises")
+                        .WithMany()
+                        .HasForeignKey("PremisesId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.RefillRequest", "RefillRequest")
+                        .WithMany()
+                        .HasForeignKey("RefillRequestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Contract");
+
+                    b.Navigation("Invoice");
+
+                    b.Navigation("Premises");
+
+                    b.Navigation("RefillRequest");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.PremisesSignatory", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", "Premises")
+                        .WithMany()
+                        .HasForeignKey("PremisesId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Premises");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.PremisesTank", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", "Premises")
+                        .WithMany()
+                        .HasForeignKey("PremisesId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Tank", "Tank")
+                        .WithMany()
+                        .HasForeignKey("TankId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Premises");
+
+                    b.Navigation("Tank");
+                });
+
             modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.RefillCollection", b =>
                 {
                     b.HasOne("SedraPetrol.Api.Domain.Entities.Driver", "Driver")
@@ -9715,6 +10271,45 @@ namespace SedraPetrol.Api.Migrations
                     b.Navigation("VisitFrequency");
                 });
 
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.DeliveryContract", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Party", "CustomerParty")
+                        .WithMany()
+                        .HasForeignKey("CustomerPartyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Contract", null)
+                        .WithOne()
+                        .HasForeignKey("SedraPetrol.Api.Domain.Entities.DeliveryContract", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", "Premises")
+                        .WithMany()
+                        .HasForeignKey("PremisesId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.PremisesSignatory", "Signatory")
+                        .WithMany()
+                        .HasForeignKey("SignatoryId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.TaxRate", "TaxRate")
+                        .WithMany()
+                        .HasForeignKey("TaxRateId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("CustomerParty");
+
+                    b.Navigation("Premises");
+
+                    b.Navigation("Signatory");
+
+                    b.Navigation("TaxRate");
+                });
+
             modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.SupplyContract", b =>
                 {
                     b.HasOne("SedraPetrol.Api.Domain.Entities.Contract", null)
@@ -9744,6 +10339,31 @@ namespace SedraPetrol.Api.Migrations
                     b.Navigation("Tenant");
 
                     b.Navigation("UsageType");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.Restaurant", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", null)
+                        .WithOne()
+                        .HasForeignKey("SedraPetrol.Api.Domain.Entities.Restaurant", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.LookupValue", "KitchenType")
+                        .WithMany()
+                        .HasForeignKey("KitchenTypeId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("KitchenType");
+                });
+
+            modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.Villa", b =>
+                {
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Premises", null)
+                        .WithOne()
+                        .HasForeignKey("SedraPetrol.Api.Domain.Entities.Villa", "Id")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("SedraPetrol.Api.Domain.Entities.AuditTrail", b =>

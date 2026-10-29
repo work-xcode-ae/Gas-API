@@ -39,6 +39,7 @@ builder.Services.AddScoped<DataSeeder>();
 builder.Services.AddScoped<TokenService>();
 builder.Services.AddScoped<RefreshTokenService>();
 builder.Services.AddHostedService<DailyJobsService>();
+builder.Services.AddPremisesModule();   // Restaurants & Villas (additive module)
 builder.Services.Configure<JwtOptions>(cfg.GetSection("Jwt"));
 builder.Services.Configure<StorageOptions>(cfg.GetSection("Storage"));
 
@@ -114,6 +115,9 @@ if (cfg.GetValue<bool>("Seed:Enabled"))
 {
     using var scope = app.Services.CreateScope();
     await scope.ServiceProvider.GetRequiredService<DataSeeder>().SeedAsync();
+    // Restaurants & Villas lookups (insert-only); a failure here must never stop the existing system
+    try { await scope.ServiceProvider.GetRequiredService<PremisesSeeder>().SeedAsync(); }
+    catch (Exception ex) { app.Logger.LogWarning(ex, "Restaurants & Villas seed failed."); }
     // every person / company has its own ledger account
     try { await scope.ServiceProvider.GetRequiredService<PartyService>().EnsureAllAccountsAsync(); }
     catch (Exception ex) { app.Logger.LogWarning(ex, "Party accounts were not created."); }
