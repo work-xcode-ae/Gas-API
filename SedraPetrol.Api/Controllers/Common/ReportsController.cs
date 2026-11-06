@@ -50,7 +50,8 @@ public class ReportsController : ApiControllerBase
         var (f, t) = Range(from, to);
         var br = Branches(branchId); var all = br.Count == 0;
         var (_, deadPay) = await HttpContext.RequestServices.GetRequiredService<BalanceQueries>().DeadStatusesAsync();
-        var q = Db.Payments.AsNoTracking().Where(p => p.PaymentDate >= f && p.PaymentDate <= t && !deadPay.Contains(p.StatusId) && (all || br.Contains(p.BranchId)));
+        // money actually received: a deposit applied to invoices at move-out (receipt without a payment method) is an offset, not a collection
+        var q = Db.Payments.AsNoTracking().Where(p => p.PaymentDate >= f && p.PaymentDate <= t && !deadPay.Contains(p.StatusId) && p.PaymentMethodId != null && (all || br.Contains(p.BranchId)));
         if (groupBy == "method")
         {
             var rows = await q.GroupBy(p => p.PaymentMethodId).Select(g => new { g.Key, Amount = g.Sum(p => p.Amount), Count = g.Count() }).ToListAsync();
@@ -86,10 +87,25 @@ public class ReportsController : ApiControllerBase
                 d60 = g.Where(x => x.days is > 30 and <= 60).Sum(x => x.bal), d90 = g.Where(x => x.days is > 60 and <= 90).Sum(x => x.bal),
                 over90 = g.Where(x => x.days > 90).Sum(x => x.bal), total = g.Sum(x => x.bal),
             }).OrderByDescending(x => x.total).ToList();
+
+        // unallocated customer credit (receipts / credit notes not applied, net of refunds): net = invoices due − credit, which agrees with the ledger
+        var balances = HttpContext.RequestServices.GetRequiredService<BalanceQueries>();
+        var (_, deadPay) = await balances.DeadStatusesAsync();
+        var creditTenants = await Db.Payments.AsNoTracking().Where(p => !deadPay.Contains(p.StatusId) && (all || br.Contains(p.BranchId))).Select(p => p.TenantId)
+            .Union(Db.CreditNotes.AsNoTracking().Where(c => c.Status == "posted" && (all || br.Contains(c.BranchId))).Select(c => c.TenantId)).Distinct().ToListAsync();
+        if (buildingId != null) creditTenants = creditTenants.Where(t => rows.Any(r => r.tenantId == t)).ToList();
+        var credit = new Dictionary<long, decimal>();
+        foreach (var t in creditTenants) { var c = await balances.TenantCreditAsync(t); if (c > 0.004m) credit[t] = c; }
+        var names = await Db.Tenants.AsNoTracking().Where(t => credit.Keys.Contains(t.Id)).Select(t => new { t.Id, t.Party!.NameEn, t.Party.NameAr, t.Party.Phone }).ToListAsync();
+        var all2 = rows.Select(r => new { r.tenantId, r.tenant, r.phone, r.current, r.d30, r.d60, r.d90, r.over90, r.total, credit = credit.GetValueOrDefault(r.tenantId), net = r.total - credit.GetValueOrDefault(r.tenantId) })
+            .Concat(names.Where(n => rows.All(r => r.tenantId != n.Id)).Select(n => new { tenantId = n.Id, tenant = Loc(n.NameEn, n.NameAr), phone = n.Phone, current = 0m, d30 = 0m, d60 = 0m, d90 = 0m, over90 = 0m, total = 0m,
+                credit = credit[n.Id], net = -credit[n.Id] }))
+            .OrderByDescending(x => x.net).ToList();
         return Ok(new
         {
-            asOf = Today, rows,
-            totals = new { current = rows.Sum(r => r.current), d30 = rows.Sum(r => r.d30), d60 = rows.Sum(r => r.d60), d90 = rows.Sum(r => r.d90), over90 = rows.Sum(r => r.over90), total = rows.Sum(r => r.total) },
+            asOf = Today, rows = all2,
+            totals = new { current = rows.Sum(r => r.current), d30 = rows.Sum(r => r.d30), d60 = rows.Sum(r => r.d60), d90 = rows.Sum(r => r.d90), over90 = rows.Sum(r => r.over90), total = rows.Sum(r => r.total),
+                           credit = all2.Sum(r => r.credit), net = all2.Sum(r => r.net) },
         });
     }
 
@@ -172,6 +188,62 @@ public class ReportsController : ApiControllerBase
         });
     }
 
+    /// <summary>
+    /// Meter stock and value: meters by where their purchase cost sits (in stock / installed / written off), by model and by
+    /// purchase bill (bought vs registered), with the ledger balance of «meters in stock» (FEE_TYPE meter_purchase account, 1402)
+    /// for reconciliation. Meters registered without a purchase bill have no cost in the ledger («untracked»).
+    /// </summary>
+    [HttpGet("meter-stock")]
+    public async Task<IActionResult> MeterStock([FromQuery] long? branchId, [FromQuery] DateOnly? asOf)
+    {
+        await LoadLookups();
+        var br = Branches(branchId); var all = br.Count == 0;
+        var meters = await Db.Meters.AsNoTracking().Where(m => all || br.Contains(m.BranchId ?? 0))
+            .Select(m => new { m.Id, m.MeterNo, m.SerialNo, m.Brand, m.Model, m.StatusId, m.PurchaseCost, m.PurchaseBillId, m.CostLocation, BillNo = m.PurchaseBill!.BillNo,
+                               Installed = Db.MeterAssignments.Any(a => a.MeterId == m.Id && a.ToDate == null) }).ToListAsync();
+        string Loc2(string? l) => l ?? "untracked";
+        var byLocation = new[] { "stock", "installed", "written_off", "untracked" }.Select(l => new
+        {
+            location = l, count = meters.Count(m => Loc2(m.CostLocation) == l), value = meters.Where(m => Loc2(m.CostLocation) == l).Sum(m => m.PurchaseCost ?? 0),
+        }).ToList();
+        var byModel = meters.GroupBy(m => new { m.Brand, m.Model }).Select(g => new
+        {
+            g.Key.Brand, g.Key.Model, total = g.Count(), inStock = g.Count(m => !m.Installed && Code(m.StatusId) == "in_stock"), installed = g.Count(m => m.Installed),
+            stockValue = g.Where(m => m.CostLocation == "stock").Sum(m => m.PurchaseCost ?? 0), installedValue = g.Where(m => m.CostLocation == "installed").Sum(m => m.PurchaseCost ?? 0),
+        }).OrderBy(x => x.Brand).ThenBy(x => x.Model).ToList();
+        var meterFee = await Lookups.IdOrNullAsync(LookupTypes.FeeType, "meter_purchase");
+        var billIds = meters.Where(m => m.PurchaseBillId != null).Select(m => m.PurchaseBillId!.Value).Distinct().ToList();
+        var billQty = await Db.VendorBillItems.AsNoTracking().Where(i => billIds.Contains(i.BillId) && i.ItemTypeId == meterFee)
+            .GroupBy(i => i.BillId).Select(g => new { g.Key, Qty = g.Sum(i => i.Quantity ?? 0), Amount = g.Sum(i => i.Amount ?? 0) }).ToDictionaryAsync(x => x.Key);
+        var byBill = meters.Where(m => m.PurchaseBillId != null).GroupBy(m => new { m.PurchaseBillId, m.BillNo }).Select(g => new
+        {
+            billId = g.Key.PurchaseBillId, billNo = g.Key.BillNo, bought = billQty.GetValueOrDefault(g.Key.PurchaseBillId!.Value)?.Qty ?? 0,
+            billAmount = billQty.GetValueOrDefault(g.Key.PurchaseBillId!.Value)?.Amount ?? 0, registered = g.Count(), registeredValue = g.Sum(m => m.PurchaseCost ?? 0),
+        }).ToList();
+        // ledger: «meters in stock» account
+        var companyId = await Db.Companies.Select(c => c.Id).FirstAsync();
+        var stockAcc = await Db.AccountMappings.Where(m => m.CompanyId == companyId && m.SourceType == MappingSources.VendorBillItem && m.SourceKeyId == meterFee && m.IsActive)
+            .Select(m => m.DebitAccountId).FirstOrDefaultAsync();
+        var draft = await Lookups.IdOrNullAsync(LookupTypes.JournalStatus, "draft");
+        var d = asOf ?? Today;
+        var ledger = stockAcc == null ? (decimal?)null : await Db.JournalLines.Where(l => l.AccountId == stockAcc && l.JournalEntry!.StatusId != draft && l.JournalEntry.EntryDate <= d
+                                                                                          && (all || br.Contains(l.JournalEntry.BranchId)))
+            .SumAsync(l => (decimal?)((l.Debit ?? 0) - (l.Credit ?? 0))) ?? 0;
+        // bought but not yet registered as meters (still in the stock account without a serial)
+        var cancelledBill = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "cancelled");
+        var boughtTotal = await Db.VendorBillItems.AsNoTracking().Where(i => i.ItemTypeId == meterFee && i.Bill!.StatusId != cancelledBill && i.Bill.BillDate <= d
+                                                                               && (all || br.Contains(i.Bill.BranchId)))
+            .SumAsync(i => (decimal?)(i.Amount ?? 0)) ?? 0;
+        var notRegistered = boughtTotal - meters.Where(m => m.PurchaseBillId != null && m.CostLocation != null).Sum(m => m.PurchaseCost ?? 0);
+        var stockValue = byLocation.First(x => x.location == "stock").value;
+        return Ok(new
+        {
+            asOf = d, byLocation, byModel, byBill,
+            ledger = new { stockAccountBalance = ledger, metersInStockValue = stockValue, boughtNotRegistered = notRegistered,
+                           difference = ledger == null ? (decimal?)null : ledger - stockValue - notRegistered },
+        });
+    }
+
     /// <summary>Refills delivered per building with purchase cost.</summary>
     [HttpGet("refills")]
     public async Task<IActionResult> Refills([FromQuery] DateOnly? from, [FromQuery] DateOnly? to, [FromQuery] long? branchId)
@@ -202,11 +274,19 @@ public class ReportsController : ApiControllerBase
         var cancelled = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "cancelled");
         var bills = await Db.VendorBills.AsNoTracking().Where(b => b.StatusId != cancelled).Select(b => new { b.Id, b.VendorId, Total = b.TotalAmount ?? 0 }).ToListAsync();
         var paid = await billing.PaidByBillAsync(bills.Select(b => b.Id));
-        var vendors = await Db.Vendors.AsNoTracking().ToDictionaryAsync(v => v.Id);
-        return Ok(bills.GroupBy(b => b.VendorId).Select(g => new
+        var vendors = await Db.Vendors.AsNoTracking().Include(v => v.Party).ToDictionaryAsync(v => v.Id);
+        // payments not allocated to any bill (advances to the supplier) reduce what we owe, as in the ledger
+        var advances = await billing.VendorAdvancesAsync();
+        return Ok(bills.Select(b => b.VendorId).Concat(advances.Keys).Distinct().Select(vid =>
         {
-            vendorId = g.Key, vendor = Loc(vendors.GetValueOrDefault(g.Key)?.Party!.NameEn, vendors.GetValueOrDefault(g.Key)?.Party!.NameAr),
-            billed = g.Sum(b => b.Total), paid = g.Sum(b => paid.GetValueOrDefault(b.Id)), outstanding = g.Sum(b => b.Total - paid.GetValueOrDefault(b.Id)),
+            var g = bills.Where(b => b.VendorId == vid).ToList();
+            var adv = advances.GetValueOrDefault(vid);
+            return new
+            {
+                vendorId = vid, vendor = Loc(vendors.GetValueOrDefault(vid)?.Party?.NameEn, vendors.GetValueOrDefault(vid)?.Party?.NameAr),
+                billed = g.Sum(b => b.Total), paid = g.Sum(b => paid.GetValueOrDefault(b.Id)), advance = adv,
+                outstanding = g.Sum(b => b.Total - paid.GetValueOrDefault(b.Id)) - adv,
+            };
         }).OrderByDescending(x => x.outstanding));
     }
 
@@ -217,8 +297,15 @@ public class ReportsController : ApiControllerBase
         var (f, t) = Range(from, to);
         var (deadInv, _) = await HttpContext.RequestServices.GetRequiredService<BalanceQueries>().DeadStatusesAsync();
         var cancelledBill = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "cancelled");
-        var output = await Db.Invoices.Where(i => i.IssueDate >= f && i.IssueDate <= t && !deadInv.Contains(i.StatusId))
-            .GroupBy(i => 1).Select(g => new { Net = g.Sum(i => i.Subtotal ?? 0), Vat = g.Sum(i => i.VatAmount ?? 0) }).FirstOrDefaultAsync();
+        // supplies = invoice lines except refundable deposits (a liability, not a supply), less posted credit notes of the period
+        var depositType = await Lookups.IdOrNullAsync(LookupTypes.FeeType, "deposit");
+        var invNet = await Db.InvoiceItems.Where(x => x.Invoice!.IssueDate >= f && x.Invoice.IssueDate <= t && !deadInv.Contains(x.Invoice.StatusId) && x.ItemTypeId != depositType)
+            .SumAsync(x => (decimal?)(x.Amount ?? 0)) ?? 0;
+        var invVat = await Db.Invoices.Where(i => i.IssueDate >= f && i.IssueDate <= t && !deadInv.Contains(i.StatusId)).SumAsync(i => (decimal?)(i.VatAmount ?? 0)) ?? 0;
+        var cnNet = await Db.CreditNoteLines.Where(l => l.CreditNote!.Status == "posted" && l.CreditNote.IssueDate >= f && l.CreditNote.IssueDate <= t && l.ItemTypeId != depositType)
+            .SumAsync(l => (decimal?)l.Amount) ?? 0;
+        var cnVat = await Db.CreditNotes.Where(c => c.Status == "posted" && c.IssueDate >= f && c.IssueDate <= t).SumAsync(c => (decimal?)c.VatAmount) ?? 0;
+        var output = new { Net = invNet - cnNet, Vat = invVat - cnVat };
         var input = await Db.VendorBills.Where(b => b.BillDate >= f && b.BillDate <= t && b.StatusId != cancelledBill)
             .GroupBy(b => 1).Select(g => new { Net = g.Sum(b => b.Subtotal ?? 0), Vat = g.Sum(b => b.VatAmount ?? 0) }).FirstOrDefaultAsync();
         var trn = await Db.Companies.Select(c => c.Trn).FirstOrDefaultAsync();

@@ -46,7 +46,11 @@ public class ContractService
         public bool AutoRenew { get; init; }
         public short? RenewalPeriodMonths { get; init; }
         public decimal? DepositAmount { get; init; }
+        /// <summary>The deposit was received at signing: a deposit invoice and its receipt are recorded (Dr cash / bank, Cr customer deposits).</summary>
         public bool DepositPaid { get; init; }
+        /// <summary>How the deposit paid at signing was received (PAYMENT_METHOD code, default cash) and its reference (cheque / transfer no.).</summary>
+        public string? DepositMethod { get; init; }
+        public string? DepositReference { get; init; }
         public DateOnly? DepositDate { get; init; }
         public string? Terms { get; init; }
         /// <summary>draft | active | pending (default active)</summary>
@@ -122,6 +126,7 @@ public class ContractService
         await _db.SaveChangesAsync();
 
         if (i.IssueInitialInvoice) await InitialInvoiceAsync(c, unit.BuildingId);
+        if (c.DepositPaid && (c.DepositAmount ?? 0) > 0) await DepositReceivedAsync(c, unit.BuildingId, i.DepositMethod, i.DepositReference);
         _activity.Log("supply_contract", c.Id, "create", $"Contract {c.ContractNo} created for unit {unit.UnitNo}", unit.BuildingId, c.BranchId);
         await _db.SaveChangesAsync();
         return c;
@@ -271,6 +276,24 @@ public class ContractService
         u.StatusId = await _lookups.IdOrNullAsync(LookupTypes.UnitStatus, code) ?? u.StatusId;
     }
 
+    /// <summary>
+    /// Deposit received at signing: a deposit invoice (Dr customer / Cr 2301 customer deposits, tagged with the contract so the
+    /// deposit counts as held) and a receipt allocated to it (Dr cash / bank / Cr customer). Dated the deposit date (default the
+    /// contract start), never in the future.
+    /// </summary>
+    private async Task DepositReceivedAsync(SupplyContract c, long buildingId, string? method, string? reference)
+    {
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var date = c.DepositDate ?? (c.StartDate < today ? c.StartDate : today);
+        if (date > today) date = today;
+        c.DepositDate = date;
+        var inv = await _billing.CreateInvoiceAsync(new InvoiceDraft(c.BranchId, c.TenantId, buildingId, c.Id, "deposit", null,
+            date, date, null, null, null, $"Security deposit received at signing – {c.ContractNo}",
+            new[] { new InvoiceLineInput("deposit", null, "Security deposit", 1, "each", c.DepositAmount!.Value, 0) }, true));
+        await _billing.ReceiveAsync(c.BranchId, c.TenantId, c.DepositAmount!.Value, date, method, reference,
+            $"Security deposit – {c.ContractNo}", new[] { new AllocationInput(inv.Id, c.DepositAmount!.Value) });
+    }
+
     private async Task InitialInvoiceAsync(SupplyContract c, long buildingId)
     {
         var oneTime = await _lookups.IdOrNullAsync(LookupTypes.FeeCycle, "one_time");
@@ -286,7 +309,9 @@ public class ContractService
         if ((c.DepositAmount ?? 0) > 0 && !c.DepositPaid && fees.All(f => f.FeeTypeId != depositType))
             lines.Add(new InvoiceLineInput("deposit", null, "Security deposit", 1, "each", c.DepositAmount!.Value, 0));
         if (lines.Count == 0) return;
+        // the initial charges belong to the contract start (a back-dated contract is invoiced on its start date, never in the future)
+        var today = DateOnly.FromDateTime(DateTime.Today);
         await _billing.CreateInvoiceAsync(new InvoiceDraft(c.BranchId, c.TenantId, buildingId, c.Id, "connection", null,
-            DateOnly.FromDateTime(DateTime.Today), null, null, null, null, $"Initial charges – {c.ContractNo}", lines, true));
+            c.StartDate < today ? c.StartDate : today, null, null, null, null, $"Initial charges – {c.ContractNo}", lines, true));
     }
 }

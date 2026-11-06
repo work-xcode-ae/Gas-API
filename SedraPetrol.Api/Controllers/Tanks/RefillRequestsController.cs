@@ -83,7 +83,9 @@ public class RefillRequestsController : ApiControllerBase
         var tank = await Db.Tanks.FirstOrDefaultAsync(t => t.Id == input.TankId) ?? throw new NotFoundException("Tank", input.TankId);
         EnsureBranchAccess(tank.BranchId);
         if (input.RequestedQty <= 0) throw new AppException("Requested quantity must be greater than zero.");
-        var free = tank.CapacityLitres - (tank.CurrentLevelLitres ?? 0);
+        // gas in the tank now (last measurement − meter usage since), not the last typed-in level
+        var nowLevel = (await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForTanksAsync(new[] { tank.Id })).GetValueOrDefault(tank.Id)?.Now ?? (tank.CurrentLevelLitres ?? 0);
+        var free = tank.CapacityLitres - nowLevel;
         if (input.RequestedQty > free) throw new BusinessRuleException($"Requested {input.RequestedQty} L but the tank has only {free} L free capacity.");
         var completed = await Lookups.IdOrNullAsync(LookupTypes.RefillStatus, "completed");
         var cancelled = await Lookups.IdOrNullAsync(LookupTypes.RefillStatus, "cancelled");
@@ -98,7 +100,7 @@ public class RefillRequestsController : ApiControllerBase
             RequestDate = input.RequestDate ?? Today,
             RequestedBy = Me.UserId,
             RequestedQtyLitres = input.RequestedQty,
-            LevelAtRequestLitres = tank.CurrentLevelLitres,
+            LevelAtRequestLitres = nowLevel,
             PriorityId = await Lk(LookupTypes.Priority, null, input.Priority ?? "medium", field: "priority"),
             CurrentStageId = await LkId(LookupTypes.RefillStage, "0"),
             StatusId = await LkId(LookupTypes.RefillStatus, "requested"),
@@ -201,7 +203,7 @@ public class RefillRequestsController : ApiControllerBase
         var bill = await billing.CreateVendorBillAsync(r.BranchId, po.VendorId, input.InvoiceNumber.Trim(), input.InvoiceDate ?? Today, input.DueDate,
             "refill_request", r.Id,
             new[] { new BillingService.BillLineInput("gas_purchase", null, $"Gas purchase – {r.RequestNo} / PO {po.PoNumber}", qty, "L", price, input.VatRate, null) },
-            null, po.CurrencyId);
+            null, po.CurrencyId, await Db.Tanks.Where(t => t.Id == r.TankId).Select(t => t.BuildingId).FirstOrDefaultAsync());
         Db.RefillPurchaseInvoices.Add(new RefillPurchaseInvoice { RefillRequestId = r.Id, VendorBillId = bill.Id });
 
         // apply the stage-2 supplier payment to this bill
@@ -377,6 +379,7 @@ public class RefillRequestsController : ApiControllerBase
         var tanks = await Db.Tanks.AsNoTracking().Where(t => tankIds.Contains(t.Id))
             .Select(t => new { t.Id, t.TankNo, t.CapacityLitres, t.CurrentLevelLitres, t.BuildingId, BCode = t.Building!.Code, t.Building.NameEn, t.Building.NameAr, Gas = t.GasType!.Code })
             .ToDictionaryAsync(t => t.Id);
+        var levels = await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForTanksAsync(tankIds);
         var userIds = list.Select(r => r.RequestedBy).Concat(list.Select(r => r.ApprovedBy)).Where(x => x != null).Select(x => x!.Value).Distinct().ToList();
         var users = await Db.AppUsers.AsNoTracking().Where(u => userIds.Contains(u.Id)).ToDictionaryAsync(u => u.Id, u => Loc(u.NameEn, u.NameAr));
         var pos = await Db.RefillPos.AsNoTracking().Where(p => ids.Contains(p.RefillRequestId))
@@ -406,7 +409,7 @@ public class RefillRequestsController : ApiControllerBase
             var t = tanks.GetValueOrDefault(r.TankId);
             var stage = int.TryParse(Code(r.CurrentStageId), out var s) ? s : 0;
             var cap = t?.CapacityLitres ?? 0;
-            var level = t?.CurrentLevelLitres ?? 0;
+            var level = levels.GetValueOrDefault(r.TankId)?.Now ?? t?.CurrentLevelLitres ?? 0;
             pos.TryGetValue(r.Id, out var po); pays.TryGetValue(r.Id, out var pay); cols.TryGetValue(r.Id, out var col);
             bills.TryGetValue(r.Id, out var bill); schedules.TryGetValue(r.Id, out var sch); refills.TryGetValue(r.Id, out var rf);
             return (object)new

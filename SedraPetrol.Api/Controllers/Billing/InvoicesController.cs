@@ -165,6 +165,8 @@ public class InvoicesController : ApiControllerBase
         var pendingAmc = await Lookups.IdOrNullAsync(LookupTypes.AmcPaymentStatus, "pending");
         await Db.AmcPaymentSchedules.Where(x => x.InvoiceId == id).ForEachAsync(x => { x.InvoiceId = null; x.StatusId = pendingAmc; });
         if (inv.JournalEntryId != null) await Posting.ReverseAsync(inv.JournalEntryId.Value, Today, $"Invoice {inv.InvoiceNo} cancelled");
+        // AMC revenue already recognised from this invoice goes back too
+        await HttpContext.RequestServices.GetRequiredService<AmcRevenueService>().ReverseForInvoiceAsync(inv.Id, Today, $"Invoice {inv.InvoiceNo} cancelled");
         await Db.MeterReadings.Where(r => r.InvoiceId == id).ForEachAsync(r => r.InvoiceId = null);
         inv.StatusId = await LkId(LookupTypes.InvoiceStatus, "cancelled");
         inv.Notes = $"{inv.Notes}\nCancelled: {input.Reason}".Trim();

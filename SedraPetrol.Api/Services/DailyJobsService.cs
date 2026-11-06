@@ -76,10 +76,13 @@ public class DailyJobsService : BackgroundService
         // 5. Tank status from level
         var ok = await lookups.IdOrNullAsync(LookupTypes.TankStatus, "ok");
         var low = await lookups.IdOrNullAsync(LookupTypes.TankStatus, "low");
-        foreach (var t in await db.Tanks.Where(t => (t.StatusId == ok || t.StatusId == low) && t.CapacityLitres > 0).ToListAsync(ct))
+        var statusTanks = await db.Tanks.Where(t => (t.StatusId == ok || t.StatusId == low) && t.CapacityLitres > 0).ToListAsync(ct);
+        // judged on the gas in the tank now (last measurement − meter usage since); the measured level itself is not changed
+        var est = await new TankLevelEstimator(db).ForTanksAsync(statusTanks.Select(t => t.Id), ct);
+        foreach (var t in statusTanks)
         {
-            var pct = (t.CurrentLevelLitres ?? 0) / t.CapacityLitres * 100;
-            t.StatusId = pct < TankRules.LowLevelPercent ? low : ok;
+            var isLow = est.TryGetValue(t.Id, out var l) ? l.IsLow : (t.CurrentLevelLitres ?? 0) / t.CapacityLitres * 100 < TankRules.LowLevelPercent;
+            t.StatusId = isLow ? low : ok;
         }
         await db.SaveChangesAsync(ct);
 
@@ -88,6 +91,9 @@ public class DailyJobsService : BackgroundService
         {
             var n = await sp.GetRequiredService<OwnerBillingService>().IssueDueAmcAsync(null, sp.GetRequiredService<ILogger<DailyJobsService>>());
             if (n > 0) sp.GetRequiredService<ILogger<DailyJobsService>>().LogInformation("Daily jobs: {Count} AMC instalment invoices issued.", n);
+            // AMC revenue earned up to today: deferred revenue → maintenance revenue, month by month
+            var rec = await sp.GetRequiredService<AmcRevenueService>().RecognizeAsync();
+            if (rec.Entries > 0) sp.GetRequiredService<ILogger<DailyJobsService>>().LogInformation("Daily jobs: AMC revenue recognised {Amount} in {Entries} entries.", rec.Amount, rec.Entries);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

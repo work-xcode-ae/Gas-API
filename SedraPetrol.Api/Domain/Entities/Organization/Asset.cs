@@ -57,6 +57,17 @@ public partial class Asset : AuditableEntity
     [Column("purchase_cost", TypeName = "decimal(18,2)")]
     public decimal? PurchaseCost { get; set; }
 
+    /// <summary>Supplier bill the item was bought on (meters added to stock from a purchase bill).</summary>
+    [Column("purchase_bill_id")]
+    public long? PurchaseBillId { get; set; }
+
+    /// <summary>
+    /// Where the purchase cost sits in the ledger (meters): stock (1402 meters in stock) | installed (1501 fixed assets) |
+    /// written_off (5105). Null = no cost tracked (registered without a purchase bill / cost).
+    /// </summary>
+    [Column("cost_location"), MaxLength(15)]
+    public string? CostLocation { get; set; }
+
     [Column("assigned_employee_id")]
     public long? AssignedEmployeeId { get; set; }
 
@@ -80,6 +91,9 @@ public partial class Asset : AuditableEntity
 
     [ForeignKey(nameof(AssignedEmployeeId)), JsonIgnore]
     public Employee? AssignedEmployee { get; set; }
+
+    [ForeignKey(nameof(PurchaseBillId)), JsonIgnore]
+    public VendorBill? PurchaseBill { get; set; }
 }
 
 public partial class Asset

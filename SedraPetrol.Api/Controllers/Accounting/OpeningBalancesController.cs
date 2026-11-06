@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Domain.Entities;
@@ -212,5 +212,105 @@ public class OpeningBalancesController : ApiControllerBase
         await Db.SaveChangesAsync();
         await tx.CommitAsync();
         return Ok(created);
+    }
+
+    // ------------------------------------------------------------------ meters already owned at go-live (no purchase bill in the system)
+
+    public record MeterModelCost(string? Brand, string? Model, decimal UnitCost);
+    public record MeterOpeningInput(long? BranchId, DateOnly Date, decimal? DefaultUnitCost, List<MeterModelCost>? Models);
+    private const string MeterOpeningSource = "opening_meters";
+
+    /// <summary>Meters with no cost in the ledger yet («untracked»), by branch / brand / model: how many are in stock, installed, or lost / retired (skipped).</summary>
+    [HttpGet("meters")]
+    public async Task<IActionResult> MetersStatus([FromQuery] long? branchId, CancellationToken ct)
+    {
+        var list = await UntrackedMetersAsync(branchId, ct);
+        var done = await Db.JournalEntries.AsNoTracking().Where(j => j.SourceType == MeterOpeningSource)
+            .Select(j => new { j.Id, j.JournalNo, j.EntryDate, j.BranchId, j.StatusId, Total = Db.JournalLines.Where(l => l.JournalEntryId == j.Id).Sum(l => l.Debit ?? 0) })
+            .OrderByDescending(j => j.EntryDate).ToListAsync(ct);
+        await LoadLookups();
+        return Ok(new
+        {
+            models = list.GroupBy(m => new { m.Brand, m.Model }).Select(g => new
+            {
+                g.Key.Brand, g.Key.Model, inStock = g.Count(m => m.Place == "stock"), installed = g.Count(m => m.Place == "installed"), skipped = g.Count(m => m.Place == null),
+            }).OrderBy(x => x.Brand).ThenBy(x => x.Model),
+            total = list.Count(m => m.Place != null), skipped = list.Count(m => m.Place == null),
+            journals = done.Select(j => new { j.Id, j.JournalNo, j.EntryDate, j.BranchId, status = Code(j.StatusId), j.Total }),
+        });
+    }
+
+    /// <summary>
+    /// Give the untracked meters a cost (per brand / model, else the default) and put it in the ledger, one journal per branch:
+    /// Dr meters in stock (1402) for meters in stock, Dr fixed assets (1501) for installed meters (per building) / Cr opening-balance equity.
+    /// Lost / retired meters are skipped. A meter that already has a cost location is never touched, so running it again only picks up the rest.
+    /// </summary>
+    [HttpPost("meters")]
+    [RequirePermission("accounting.post")]
+    public async Task<IActionResult> MetersOpening([FromBody] MeterOpeningInput input, CancellationToken ct)
+    {
+        if (input.DefaultUnitCost is < 0 || (input.Models ?? new()).Any(m => m.UnitCost < 0)) throw new AppException("The meter cost cannot be negative.");
+        static string K(string? s) => (s ?? "").Trim().ToLowerInvariant();
+        decimal? CostOf(string? brand, string? model) =>
+            (input.Models ?? new()).Where(m => K(m.Brand) == K(brand) && K(m.Model) == K(model)).Select(m => (decimal?)m.UnitCost).FirstOrDefault() ?? input.DefaultUnitCost;
+        var list = (await UntrackedMetersAsync(input.BranchId, ct)).Where(m => m.Place != null).Select(m => (m, cost: CostOf(m.Brand, m.Model) ?? 0)).Where(x => x.cost > 0).ToList();
+        if (list.Count == 0) throw new BusinessRuleException("No meter without a cost matches the costs entered (lost / retired meters are skipped).");
+
+        var companyId = await CompanyIdAsync();
+        async Task<long> BillAccount(string fee)
+        {
+            var key = await Lookups.IdOrNullAsync(LookupTypes.FeeType, fee);
+            return await Db.AccountMappings.Where(x => x.CompanyId == companyId && x.SourceType == MappingSources.VendorBillItem && x.SourceKeyId == key && x.IsActive)
+                       .Select(x => x.DebitAccountId).FirstOrDefaultAsync(ct)
+                   ?? throw new BusinessRuleException($"No ledger account is set up for «{fee}» bill items. Set it under Accounting > Account mappings.");
+        }
+        var stockAcc = await BillAccount("meter_purchase");
+        var assetAcc = await BillAccount("fixed_asset");
+        var equity = await OpeningEquityAccountAsync();
+
+        await using var tx = await Db.Database.BeginTransactionAsync(ct);
+        var journals = new List<object>();
+        foreach (var br in list.GroupBy(x => x.m.BranchId))
+        {
+            var lines = new List<PostingService.Line>();
+            var stock = br.Where(x => x.m.Place == "stock").Sum(x => x.cost);
+            if (stock > 0) lines.Add(new(stockAcc, stock, 0, $"Opening value – {br.Count(x => x.m.Place == "stock")} meters in stock"));
+            foreach (var b in br.Where(x => x.m.Place == "installed").GroupBy(x => x.m.BuildingId))
+                lines.Add(new(assetAcc, b.Sum(x => x.cost), 0, $"Opening value – {b.Count()} installed meters", b.Key));
+            var total = br.Sum(x => x.cost);
+            lines.Add(new(equity, 0, total, "Opening value of meters"));
+            var je = await Posting.CreateEntryAsync(br.Key, input.Date, $"Opening value of {br.Count()} meters", MeterOpeningSource, null, lines, true);
+            var ids = br.Select(x => x.m.Id).ToList();
+            var meters = await Db.Meters.Where(m => ids.Contains(m.Id)).ToListAsync(ct);
+            foreach (var m in meters)
+            {
+                var x = br.First(y => y.m.Id == m.Id);
+                m.PurchaseCost = x.cost; m.CostLocation = x.m.Place; m.PurchaseDate ??= input.Date;
+            }
+            await Db.SaveChangesAsync(ct);
+            journals.Add(new { je.Id, je.JournalNo, branchId = br.Key, meters = br.Count(), total });
+        }
+        Activity.Log("meter", null, "opening_cost", $"Opening value for {list.Count} meters: {list.Sum(x => x.cost):0.00}", null, input.BranchId);
+        await Db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+        return Ok(new { meters = list.Count, total = list.Sum(x => x.cost), journals });
+    }
+
+    private record UntrackedMeter(long Id, long BranchId, string? Brand, string? Model, string? Place, long? BuildingId);
+
+    /// <summary>Meters without a cost location. Place: installed (open assignment), stock (anything else), null = lost / retired (skipped).</summary>
+    private async Task<List<UntrackedMeter>> UntrackedMetersAsync(long? branchId, CancellationToken ct)
+    {
+        var dead = new List<long?> { await Lookups.IdOrNullAsync(LookupTypes.MeterStatus, "lost"), await Lookups.IdOrNullAsync(LookupTypes.MeterStatus, "retired") };
+        var rows = await Db.Meters.AsNoTracking().Where(m => m.CostLocation == null && m.BranchId != null && (branchId == null || m.BranchId == branchId)
+                                                             && (Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(m.BranchId!.Value)))
+            .Select(m => new
+            {
+                m.Id, m.BranchId, m.Brand, m.Model, m.StatusId,
+                BuildingId = Db.MeterAssignments.Where(a => a.MeterId == m.Id && a.ToDate == null).Select(a => (long?)a.Unit!.BuildingId).FirstOrDefault(),
+                Installed = Db.MeterAssignments.Any(a => a.MeterId == m.Id && a.ToDate == null),
+            }).ToListAsync(ct);
+        return rows.Select(r => new UntrackedMeter(r.Id, r.BranchId!.Value, r.Brand, r.Model,
+            r.Installed ? "installed" : dead.Contains(r.StatusId) ? null : "stock", r.BuildingId)).ToList();
     }
 }

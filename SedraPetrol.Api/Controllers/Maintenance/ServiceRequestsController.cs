@@ -588,7 +588,7 @@ public class CdCertificatesController : ApiControllerBase
         await using var tx = await Db.Database.BeginTransactionAsync();
         var bill = await billing.CreateVendorBillAsync(c.BranchId, vendorId, input.BillNo.Trim(), billDate, input.DueDate ?? billDate.AddDays(7), FeeSource, r.Id,
             new[] { new BillingService.BillLineInput("inspection", null, input.Description ?? $"Civil Defense fees – certificate {c.CertificateNo ?? "(new)"}", 1, "each", input.Amount, input.VatRate ?? 0, null) },
-            $"Civil Defense certificate {(c.CertificateNo ?? "request")} – renewal #{r.Id}");
+            $"Civil Defense certificate {(c.CertificateNo ?? "request")} – renewal #{r.Id}", buildingId: c.BuildingId);
         Activity.Log("cd_certificate", c.Id, "fees", $"Civil Defense fees invoice {bill.BillNo} recorded ({bill.TotalAmount:0.##})", c.BuildingId, c.BranchId);
         await Db.SaveChangesAsync();
         // fees actually charged (before VAT) vs. what the owner was invoiced: bill the difference when higher

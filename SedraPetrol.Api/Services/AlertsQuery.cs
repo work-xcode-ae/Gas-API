@@ -55,11 +55,15 @@ public class AlertsQuery
 
         var completed = await _lookups.IdOrNullAsync(LookupTypes.RefillStatus, "completed");
         var cancelled = await _lookups.IdOrNullAsync(LookupTypes.RefillStatus, "cancelled");
-        foreach (var t in await _db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId ?? 0)) && t.CapacityLitres > 0 && (t.CurrentLevelLitres ?? 0) * 100 / t.CapacityLitres < TankRules.LowLevelPercent
-                                                                     && !_db.RefillRequests.Any(r => r.TankId == t.Id && r.StatusId != completed && r.StatusId != cancelled))
+        // low = gas in the tank now (last measurement − meter usage since), not the last typed-in level
+        var tankQuery = _db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId ?? 0)) && t.CapacityLitres > 0
+                                                            && !_db.RefillRequests.Any(r => r.TankId == t.Id && r.StatusId != completed && r.StatusId != cancelled));
+        var levels = await new TankLevelEstimator(_db).ForQueryAsync(tankQuery);
+        var lowIds = levels.Values.Where(l => l.IsLow).Select(l => l.TankId).ToList();
+        foreach (var t in await tankQuery.Where(t => lowIds.Contains(t.Id))
                      .Select(t => new { t.Id, t.TankNo, t.CapacityLitres, t.CurrentLevelLitres, t.Building!.NameAr, t.Building.NameEn }).ToListAsync())
         {
-            var pct = Math.Round((t.CurrentLevelLitres ?? 0) / t.CapacityLitres * 100, 0);
+            var pct = Math.Round(levels[t.Id].Pct, 0);
             list.Add(new Alert("low_tank", pct < 10 ? "critical" : "high", t.Id, t.TankNo, t.NameAr ?? t.NameEn, null, null,
                 $"Tank {t.TankNo} is at {pct}% with no refill request", $"الخزان {t.TankNo} عند {pct}% ولا يوجد طلب تعبئة"));
         }

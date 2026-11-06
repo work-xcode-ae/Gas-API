@@ -61,6 +61,10 @@ public partial class VendorBill : AuditableEntity
     [Column("notes")]
     public string? Notes { get; set; }
 
+    /// <summary>Building the cost belongs to (optional). Its journal lines carry the building, so the building P&amp;L includes it.</summary>
+    [Column("building_id")]
+    public long? BuildingId { get; set; }
+
     // ---- navigation properties (not serialized) ----
     [ForeignKey(nameof(BranchId)), JsonIgnore]
     public Branch? Branch { get; set; }
@@ -76,4 +80,7 @@ public partial class VendorBill : AuditableEntity
 
     [ForeignKey(nameof(JournalEntryId)), JsonIgnore]
     public JournalEntry? JournalEntry { get; set; }
+
+    [ForeignKey(nameof(BuildingId)), JsonIgnore]
+    public Building? Building { get; set; }
 }

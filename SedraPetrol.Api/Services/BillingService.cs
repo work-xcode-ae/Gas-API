@@ -210,7 +210,22 @@ public class BillingService
         return list;
     }
 
-    public async Task<Invoice> CreateInvoiceAsync(InvoiceDraft d)
+    /// <summary>
+    /// Runs the work in a transaction unless one is already open, so a document whose journal cannot be posted
+    /// (missing account mapping, closed / missing period) is never left saved without its entry.
+    /// </summary>
+    private async Task<T> InTxAsync<T>(Func<Task<T>> work)
+    {
+        if (_db.Database.CurrentTransaction != null) return await work();
+        await using var tx = await _db.Database.BeginTransactionAsync();
+        var result = await work();
+        await tx.CommitAsync();
+        return result;
+    }
+
+    public Task<Invoice> CreateInvoiceAsync(InvoiceDraft d) => InTxAsync(() => CreateInvoiceCoreAsync(d));
+
+    private async Task<Invoice> CreateInvoiceCoreAsync(InvoiceDraft d)
     {
         if (d.Lines.Count == 0) throw new AppException("An invoice needs at least one line.");
         if (!await _db.Tenants.AnyAsync(t => t.Id == d.TenantId)) throw new NotFoundException("Tenant", d.TenantId);
@@ -340,7 +355,10 @@ public class BillingService
             var isPaid = settled && (inv.TotalAmount ?? 0) > 0 && paid.GetValueOrDefault(inv.Id) >= (inv.TotalAmount ?? 0);
             if (c.DepositPaid == isPaid) continue;
             c.DepositPaid = isPaid;
-            c.DepositDate = isPaid ? DateOnly.FromDateTime(DateTime.Today) : null;
+            // paid on the date of the (last) receipt that settled the deposit invoice, not the day the status was recalculated
+            c.DepositDate = isPaid
+                ? await _db.PaymentAllocations.Where(a => a.InvoiceId == inv.Id).MaxAsync(a => (DateOnly?)a.Payment!.PaymentDate) ?? DateOnly.FromDateTime(DateTime.Today)
+                : null;
         }
         await _db.SaveChangesAsync();
     }
@@ -383,6 +401,34 @@ public class BillingService
         await _db.SaveChangesAsync();
         await RecalcInvoicesAsync(allocations.Select(a => a.InvoiceId));
         return allocations;
+    }
+
+    /// <summary>
+    /// Records a customer receipt (RCP-YYYY-NNNN): allocated as given (or FIFO), posted Dr cash / bank (by method) / Cr the customer.
+    /// Used where money is received outside the payments screen (deposit paid at contract signing).
+    /// </summary>
+    public Task<Payment> ReceiveAsync(long branchId, long tenantId, decimal amount, DateOnly date, string? method, string? reference, string? notes,
+        IReadOnlyList<AllocationInput>? allocations, long? receivedBy = null) =>
+        InTxAsync(() => ReceiveCoreAsync(branchId, tenantId, amount, date, method, reference, notes, allocations, receivedBy));
+
+    private async Task<Payment> ReceiveCoreAsync(long branchId, long tenantId, decimal amount, DateOnly date, string? method, string? reference, string? notes,
+        IReadOnlyList<AllocationInput>? allocations, long? receivedBy)
+    {
+        if (amount <= 0) throw new AppException("Amount must be greater than zero.");
+        var p = new Payment
+        {
+            BranchId = branchId, ReceiptNo = await _numbers.NextAsync(NumberPrefixes.Receipt, date: date), TenantId = tenantId,
+            PaymentDate = date, Amount = amount, ReferenceNo = reference, Notes = notes, ReceivedBy = receivedBy,
+            CurrencyId = await _db.Currencies.Where(c => c.Code == "AED").Select(c => (long?)c.Id).FirstOrDefaultAsync(),
+            PaymentMethodId = await _lookups.ResolveAsync(LookupTypes.PaymentMethod, null, string.IsNullOrWhiteSpace(method) ? "cash" : method.Trim(), field: "depositMethod"),
+            StatusId = await _lookups.IdAsync(LookupTypes.PaymentStatus, "completed"),
+        };
+        _db.Payments.Add(p);
+        await _db.SaveChangesAsync();
+        await AllocateAsync(p, allocations);
+        p.JournalEntryId = (await _posting.PostPaymentAsync(p))?.Id;
+        await _db.SaveChangesAsync();
+        return p;
     }
 
     public record OpenInvoice(long Id, string No, DateOnly DueDate, decimal Total, decimal Paid)
@@ -437,7 +483,17 @@ public class BillingService
             }
         }
 
-        foreach (var f in fees.Where(f => includeMonthlyFees && f.CycleId == monthly && f.FeeTypeId != gasPriceType))
+        // a monthly fee is billed once per period: skip fee types already on a live (not cancelled) invoice of this contract
+        // whose billing period overlaps this one, so re-running the billing for a period never bills the fees twice
+        var cancelledInv = await _lookups.IdOrNullAsync(LookupTypes.InvoiceStatus, "cancelled");
+        var alreadyBilledFees = includeMonthlyFees
+            ? await _db.InvoiceItems.AsNoTracking()
+                .Where(it => it.Invoice!.ContractId == c.Id && it.Invoice.StatusId != cancelledInv
+                             && it.Invoice.BillingPeriodStart != null && it.Invoice.BillingPeriodStart <= periodEnd
+                             && (it.Invoice.BillingPeriodEnd ?? it.Invoice.BillingPeriodStart) >= periodStart)
+                .Select(it => it.ItemTypeId).Distinct().ToListAsync()
+            : new List<long?>();
+        foreach (var f in fees.Where(f => includeMonthlyFees && f.CycleId == monthly && f.FeeTypeId != gasPriceType && !alreadyBilledFees.Contains(f.FeeTypeId)))
         {
             var label = (await _lookups.GetAsync(f.FeeTypeId))?.NameEn ?? "Monthly fee";
             lines.Add(new InvoiceLineInput(null, f.FeeTypeId, $"{label} ({periodStart:MMM yyyy})", 1, "month", f.Amount, null));
@@ -463,6 +519,17 @@ public class BillingService
             .ToDictionaryAsync(x => x.Key, x => x.Paid);
     }
 
+    /// <summary>Unallocated part of live vendor payments per vendor (advances paid to suppliers before / without a bill).</summary>
+    public async Task<Dictionary<long, decimal>> VendorAdvancesAsync(long? vendorId = null)
+    {
+        var dead = await DeadPaymentStatusIdsAsync();
+        var rows = await _db.VendorPayments.AsNoTracking()
+            .Where(p => (vendorId == null || p.VendorId == vendorId) && (p.StatusId == null || !dead.Contains(p.StatusId.Value)))
+            .Select(p => new { p.VendorId, Free = p.Amount - (_db.VendorPaymentAllocations.Where(a => a.VendorPaymentId == p.Id).Sum(a => (decimal?)a.Amount) ?? 0) })
+            .ToListAsync();
+        return rows.Where(r => r.Free > 0.004m).GroupBy(r => r.VendorId).ToDictionary(g => g.Key, g => g.Sum(r => r.Free));
+    }
+
     public async Task RecalcBillsAsync(IEnumerable<long> billIds)
     {
         var ids = billIds.Distinct().ToList();
@@ -484,15 +551,20 @@ public class BillingService
 
     public record BillLineInput(string? ItemType, long? ItemTypeId, string? Description, decimal Quantity, string? Uom, decimal UnitPrice, decimal? VatRate, long? ExpenseAccountId, long? TaxRateId = null);
 
-    public async Task<VendorBill> CreateVendorBillAsync(long branchId, long vendorId, string billNo, DateOnly billDate, DateOnly? dueDate,
-        string? sourceType, long? sourceId, IReadOnlyList<BillLineInput> lines, string? notes, long? currencyId = null)
+    public Task<VendorBill> CreateVendorBillAsync(long branchId, long vendorId, string billNo, DateOnly billDate, DateOnly? dueDate,
+        string? sourceType, long? sourceId, IReadOnlyList<BillLineInput> lines, string? notes, long? currencyId = null, long? buildingId = null) =>
+        InTxAsync(() => CreateVendorBillCoreAsync(branchId, vendorId, billNo, billDate, dueDate, sourceType, sourceId, lines, notes, currencyId, buildingId));
+
+    private async Task<VendorBill> CreateVendorBillCoreAsync(long branchId, long vendorId, string billNo, DateOnly billDate, DateOnly? dueDate,
+        string? sourceType, long? sourceId, IReadOnlyList<BillLineInput> lines, string? notes, long? currencyId, long? buildingId)
     {
+        if (buildingId != null && !await _db.Buildings.AnyAsync(b => b.Id == buildingId)) throw new NotFoundException("Building", buildingId.Value);
         if (lines.Count == 0) throw new AppException("A vendor bill needs at least one line.");
         if (!await _db.Vendors.AnyAsync(v => v.Id == vendorId)) throw new NotFoundException("Vendor", vendorId);
         var bill = new VendorBill
         {
             BranchId = branchId, VendorId = vendorId, BillNo = billNo, BillDate = billDate, DueDate = dueDate ?? billDate.AddDays(DueDays),
-            SourceType = sourceType, SourceId = sourceId, Notes = notes, ExchangeRate = 1,
+            SourceType = sourceType, SourceId = sourceId, Notes = notes, ExchangeRate = 1, BuildingId = buildingId,
             CurrencyId = currencyId ?? await _db.Currencies.Where(c => c.Code == "AED").Select(c => (long?)c.Id).FirstOrDefaultAsync(),
             StatusId = await _lookups.IdAsync(LookupTypes.BillStatus, "pending"),
         };

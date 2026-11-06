@@ -24,9 +24,11 @@ public class OwnerBillingService
     private readonly IConfiguration _cfg;
 
     private readonly PartyService _parties;
+    private readonly AmcRevenueService _amcRevenue;
 
-    public OwnerBillingService(AppDbContext db, LookupService lookups, NumberingService numbers, BillingService billing, ActivityLogger activity, IConfiguration cfg, PartyService parties)
-    { _db = db; _lookups = lookups; _numbers = numbers; _billing = billing; _activity = activity; _cfg = cfg; _parties = parties; }
+    public OwnerBillingService(AppDbContext db, LookupService lookups, NumberingService numbers, BillingService billing, ActivityLogger activity, IConfiguration cfg, PartyService parties,
+        AmcRevenueService amcRevenue)
+    { _db = db; _lookups = lookups; _numbers = numbers; _billing = billing; _activity = activity; _cfg = cfg; _parties = parties; _amcRevenue = amcRevenue; }
 
     private static DateOnly Today => DateOnly.FromDateTime(DateTime.Today);
 
@@ -72,12 +74,25 @@ public class OwnerBillingService
         var customerId = await OwnerCustomerIdAsync(a.BranchId, a.BuildingId!.Value, a.OwnerPartyId, $"AMC {a.ContractNo}");
         var next = await _db.AmcPaymentSchedules.Where(s => s.ContractId == a.Id && s.DueDate > line.DueDate).OrderBy(s => s.DueDate).Select(s => (DateOnly?)s.DueDate).FirstOrDefaultAsync();
         var periodEnd = next?.AddDays(-1) ?? a.EndDate;
+        // the instalment is earned over its period: item «amc» posts to deferred revenue, recognised monthly (AmcRevenueService);
+        // without that mapping (a different chart of accounts) it is revenue on the invoice date as before
+        var companyId = await _db.Branches.Where(b => b.Id == a.BranchId).Select(b => b.CompanyId).FirstAsync();
+        var amcType = await _lookups.IdOrNullAsync(LookupTypes.FeeType, "amc");
+        var deferred = amcType != null && await _db.AccountMappings.AnyAsync(m => m.CompanyId == companyId && m.SourceType == MappingSources.InvoiceItem
+                                                                               && m.SourceKeyId == amcType && m.IsActive && m.CreditAccountId != null);
         var inv = await _billing.CreateInvoiceAsync(new InvoiceDraft(a.BranchId, customerId, a.BuildingId, a.Id, "maintenance", null, date, null,
             line.DueDate, periodEnd, a.CurrencyId, $"AMC {a.ContractNo} — {line.Label}",
-            new[] { new InvoiceLineInput("maintenance", null, $"Annual maintenance contract {a.ContractNo} — {line.Label} ({line.DueDate:yyyy-MM-dd} → {periodEnd:yyyy-MM-dd})", 1, "each", line.Amount, null) },
+            new[] { new InvoiceLineInput(deferred ? "amc" : "maintenance", null, $"Annual maintenance contract {a.ContractNo} — {line.Label} ({line.DueDate:yyyy-MM-dd} → {periodEnd:yyyy-MM-dd})", 1, "each", line.Amount, null) },
             true));
         line.InvoiceId = inv.Id;
         line.StatusId = await _lookups.IdAsync(LookupTypes.AmcPaymentStatus, "invoiced");
+        await _db.SaveChangesAsync();
+        // a back-dated instalment: months already passed are recognised at once
+        if (deferred)
+        {
+            try { await _amcRevenue.RecognizeAsync(null, inv.Id); }
+            catch (BusinessRuleException) { /* mapping of «maintenance» missing: the daily job / manual run reports it */ }
+        }
         _activity.Log("amc_contract", a.Id, "invoice", $"{a.ContractNo}: invoice {inv.InvoiceNo} issued for {line.Label}", a.BuildingId, a.BranchId);
         await _db.SaveChangesAsync();
         return inv;

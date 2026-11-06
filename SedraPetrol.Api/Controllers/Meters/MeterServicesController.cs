@@ -154,6 +154,8 @@ public class MeterServicesController : ApiControllerBase
                 assignment.ToDate = date;
                 await Ops.SetStatusAsync(meter, "maintenance");
                 await Db.SaveChangesAsync();
+                await Ops.MoveCostAsync(meter, "stock", date, await Db.Units.Where(u => u.Id == assignment.UnitId).Select(u => (long?)u.BuildingId).FirstOrDefaultAsync(),
+                    $"removed – replaced ({s.ServiceNo})");
                 newMeter.InitialReading ??= s.AfterReading;
                 await Ops.AssignAsync(newMeter, assignment.UnitId, date);
                 await Ops.AddReadingAsync(newMeter, s.AfterReading.Value, when.AddSeconds(1), "manual", $"Initial reading – installed ({s.ServiceNo})",

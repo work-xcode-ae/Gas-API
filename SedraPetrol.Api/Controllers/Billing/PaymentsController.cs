@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Domain.Entities;
@@ -15,7 +15,7 @@ public class PaymentsController : ApiControllerBase
     private BillingService Billing => HttpContext.RequestServices.GetRequiredService<BillingService>();
 
     public record CreateInput(long TenantId, decimal Amount, DateOnly? Date, string? Method, string? Reference, string? Notes,
-        long? InvoiceId, List<AllocationInput>? Allocations, string? Status);
+        long? InvoiceId, List<AllocationInput>? Allocations, string? Status, bool AllowDuplicate = false);
     public record CancelInput(string? Reason, bool Bounced = false);
 
     /// <summary>Payments (PaymentRecord). Filters: tenantId, buildingId, method, status, from, to.</summary>
@@ -72,6 +72,20 @@ public class PaymentsController : ApiControllerBase
         var tenant = await Db.Tenants.FirstOrDefaultAsync(t => t.Id == input.TenantId) ?? throw new NotFoundException("Tenant", input.TenantId);
         EnsureBranchAccess(tenant.BranchId);
         if (input.Amount <= 0) throw new AppException("Amount must be greater than zero.");
+        // F14: same customer, amount, date and reference as a live receipt → ask the user to confirm (AllowDuplicate) instead of saving twice
+        if (!input.AllowDuplicate)
+        {
+            var day = input.Date ?? Today;
+            var reference = string.IsNullOrWhiteSpace(input.Reference) ? null : input.Reference.Trim();
+            var dead = new List<long?> { await Lookups.IdOrNullAsync(LookupTypes.PaymentStatus, "cancelled"), await Lookups.IdOrNullAsync(LookupTypes.PaymentStatus, "bounced") };
+            var twin = await Db.Payments.AsNoTracking()
+                .Where(x => x.TenantId == tenant.Id && x.Amount == input.Amount && x.PaymentDate == day && !dead.Contains(x.StatusId)
+                            && (reference == null ? (x.ReferenceNo == null || x.ReferenceNo.Trim() == "") : x.ReferenceNo != null && x.ReferenceNo.Trim() == reference))
+                .Select(x => x.ReceiptNo).FirstOrDefaultAsync();
+            if (twin != null)
+                throw new BusinessRuleException($"Receipt {twin} already records {input.Amount:0.00} from this customer on {day:yyyy-MM-dd}" +
+                    (reference == null ? " without a reference" : $" with reference «{reference}»") + ". Save anyway only if this is a second, separate payment.", "possible_duplicate");
+        }
         var allocations = input.Allocations;
         if ((allocations == null || allocations.Count == 0) && input.InvoiceId != null)
         {

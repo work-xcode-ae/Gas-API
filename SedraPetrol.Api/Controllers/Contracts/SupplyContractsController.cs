@@ -264,8 +264,9 @@ public class SupplyContractsController : ApiControllerBase
 
     /// <summary>Deposit still held for this contract = credits − debits on the customer deposits account tagged with the contract.</summary>
     private async Task<decimal> DepositHeldAsync(SupplyContract c, long depositAccountId) =>
+        // posted and reversed entries both count (a reversed entry and its reversal net to zero); drafts do not
         await Db.JournalLines.Where(l => l.AccountId == depositAccountId && l.ContractId == c.Id && l.JournalEntry!.StatusId != null
-                && l.JournalEntry.Status!.Code == "posted")
+                && l.JournalEntry.Status!.Code != "draft")
             .SumAsync(l => (decimal?)((l.Credit ?? 0) - (l.Debit ?? 0))) ?? 0;
 
     /// <summary>The security deposit of the contract: held amount and what the customer still owes.</summary>

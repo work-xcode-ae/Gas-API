@@ -32,6 +32,8 @@ builder.Services.AddScoped<OwnerBillingService>();
 builder.Services.AddScoped<TaxService>();
 builder.Services.AddScoped<BalanceQueries>();
 builder.Services.AddScoped<ContractService>();
+builder.Services.AddScoped<TankLevelEstimator>();
+builder.Services.AddScoped<AmcRevenueService>();
 builder.Services.AddScoped<MeterOps>();
 builder.Services.AddScoped<AlertsQuery>();
 builder.Services.AddScoped<FileStorageService>();

@@ -12,6 +12,17 @@ namespace SedraPetrol.Api.Controllers;
 [PermissionModule("settings")]
 public class CompaniesController : CrudController<Company>
 {
+    /// <summary>Public branding for the portal shell (app name, browser icon, logo) — readable before sign-in.</summary>
+    [HttpGet("branding")]
+    [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+    public async Task<IActionResult> Branding()
+    {
+        var c = await Db.Companies.AsNoTracking().OrderByDescending(x => x.IsActive).ThenBy(x => x.Id)
+            .Select(x => new { x.NameEn, x.NameAr, x.LogoPath, x.LogoDarkPath, x.Phone, x.CustomerCarePhone })
+            .FirstOrDefaultAsync();
+        return Ok(c);
+    }
+
     /// <summary>Upload branding: kind = logo | logo_dark | stamp | letterhead. Stores the file and saves its path on the company.</summary>
     [HttpPost("{id:long}/branding/{kind}")]
     [RequestSizeLimit(10_000_000)]

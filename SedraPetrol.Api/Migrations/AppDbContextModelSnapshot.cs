@@ -590,6 +590,11 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("category_id");
 
+                    b.Property<string>("CostLocation")
+                        .HasMaxLength(15)
+                        .HasColumnType("nvarchar(15)")
+                        .HasColumnName("cost_location");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("datetimeoffset")
@@ -622,6 +627,10 @@ namespace SedraPetrol.Api.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)")
                         .HasColumnName("notes");
+
+                    b.Property<long?>("PurchaseBillId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("purchase_bill_id");
 
                     b.Property<decimal?>("PurchaseCost")
                         .HasColumnType("decimal(18,2)")
@@ -666,6 +675,8 @@ namespace SedraPetrol.Api.Migrations
                     b.HasIndex("BuildingId");
 
                     b.HasIndex("CategoryId");
+
+                    b.HasIndex("PurchaseBillId");
 
                     b.HasIndex("SerialNo")
                         .IsUnique()
@@ -6856,6 +6867,10 @@ namespace SedraPetrol.Api.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("branch_id");
 
+                    b.Property<long?>("BuildingId")
+                        .HasColumnType("bigint")
+                        .HasColumnName("building_id");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("datetimeoffset")
@@ -6934,6 +6949,8 @@ namespace SedraPetrol.Api.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("BranchId");
+
+                    b.HasIndex("BuildingId");
 
                     b.HasIndex("CurrencyId");
 
@@ -8154,6 +8171,11 @@ namespace SedraPetrol.Api.Migrations
                         .HasForeignKey("CategoryId")
                         .OnDelete(DeleteBehavior.Restrict);
 
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.VendorBill", "PurchaseBill")
+                        .WithMany()
+                        .HasForeignKey("PurchaseBillId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("SedraPetrol.Api.Domain.Entities.LookupValue", "Status")
                         .WithMany()
                         .HasForeignKey("StatusId")
@@ -8166,6 +8188,8 @@ namespace SedraPetrol.Api.Migrations
                     b.Navigation("Building");
 
                     b.Navigation("Category");
+
+                    b.Navigation("PurchaseBill");
 
                     b.Navigation("Status");
                 });
@@ -9967,6 +9991,11 @@ namespace SedraPetrol.Api.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
 
+                    b.HasOne("SedraPetrol.Api.Domain.Entities.Building", "Building")
+                        .WithMany()
+                        .HasForeignKey("BuildingId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.HasOne("SedraPetrol.Api.Domain.Entities.Currency", "Currency")
                         .WithMany()
                         .HasForeignKey("CurrencyId")
@@ -9989,6 +10018,8 @@ namespace SedraPetrol.Api.Migrations
                         .IsRequired();
 
                     b.Navigation("Branch");
+
+                    b.Navigation("Building");
 
                     b.Navigation("Currency");
 

@@ -110,7 +110,7 @@ public class AssetsController : CrudController<Asset>
         var date = input.BillDate ?? a.PurchaseDate ?? Today;
         var bill = await billing.CreateVendorBillAsync(branchId, input.VendorId, input.BillNo.Trim(), date, input.DueDate, "asset", a.Id,
             new[] { new Services.BillingService.BillLineInput("fixed_asset", null, $"{a.AssetCode} — {a.NameAr ?? a.NameEn}", 1, "each", a.PurchaseCost!.Value, input.VatRate, null, input.TaxRateId) },
-            input.Notes ?? $"Purchase of asset {a.AssetCode}");
+            input.Notes ?? $"Purchase of asset {a.AssetCode}", buildingId: a.BuildingId);
         a.PurchaseDate ??= date;
         await Db.SaveChangesAsync();
         Activity.Log("asset", a.Id, "purchase", $"Asset {a.AssetCode} purchase bill {bill.BillNo} recorded", a.BuildingId, branchId);

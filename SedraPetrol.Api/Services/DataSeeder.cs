@@ -37,7 +37,7 @@ public class DataSeeder
         ("READING_METHOD", "Reading method", "طريقة القراءة", new[] { ("manual", "Manual", "يدوي"), ("remote", "Remote", "عن بعد"), ("customer", "Customer", "العميل"), ("photo", "Photo", "صورة") }),
         ("READING_TYPE", "Reading type", "نوع القراءة", new[] { ("opening", "Opening", "افتتاحية"), ("periodic", "Periodic", "دورية"), ("closing", "Closing", "ختامية"), ("replacement_out", "Replacement – old meter", "استبدال – العداد القديم"), ("replacement_in", "Replacement – new meter", "استبدال – العداد الجديد"), ("removal", "Meter removal", "فك العداد") }),
         ("CONTRACT_STATUS", "Contract status", "حالة العقد", new[] { ("draft", "Draft", "مسودة"), ("active", "Active", "نشط"), ("pending", "Pending", "معلق"), ("expired", "Expired", "منتهي"), ("terminated", "Terminated", "ملغي") }),
-        ("FEE_TYPE", "Fee type", "نوع الرسوم", new[] { ("gas_price", "Gas price (per m³)", "سعر الغاز (لكل م³)"), ("maintenance", "Maintenance", "صيانة"), ("connection", "Connection", "توصيل"), ("disconnection", "Disconnection", "فصل"), ("inspection", "Inspection", "فحص"), ("meter_rent", "Meter rent", "إيجار العداد"), ("insurance", "Insurance", "تأمين"), ("deposit", "Deposit", "تأمين نقدي"), ("gas_purchase", "Gas purchase", "شراء غاز"), ("other", "Other", "أخرى"), ("gov_fees", "Government fees (recharged)", "رسوم حكومية مستردة"), ("cd_service", "Civil Defense certificate service", "خدمة شهادة الدفاع المدني"), ("fixed_asset", "Fixed asset purchase", "شراء أصل ثابت"), ("service", "Service charge", "رسوم الخدمة"), ("admin", "Administration charge", "رسوم إدارية") }),
+        ("FEE_TYPE", "Fee type", "نوع الرسوم", new[] { ("gas_price", "Gas price (per m³)", "سعر الغاز (لكل م³)"), ("maintenance", "Maintenance", "صيانة"), ("connection", "Connection", "توصيل"), ("disconnection", "Disconnection", "فصل"), ("inspection", "Inspection", "فحص"), ("meter_rent", "Meter rent", "إيجار العداد"), ("insurance", "Insurance", "تأمين"), ("deposit", "Deposit", "تأمين نقدي"), ("gas_purchase", "Gas purchase", "شراء غاز"), ("other", "Other", "أخرى"), ("gov_fees", "Government fees (recharged)", "رسوم حكومية مستردة"), ("cd_service", "Civil Defense certificate service", "خدمة شهادة الدفاع المدني"), ("fixed_asset", "Fixed asset purchase", "شراء أصل ثابت"), ("service", "Service charge", "رسوم الخدمة"), ("admin", "Administration charge", "رسوم إدارية"), ("amc", "AMC instalment (deferred revenue)", "قسط عقد صيانة (إيراد مؤجل)"), ("meter_purchase", "Gas meters purchase (stock)", "شراء عدادات غاز (مخزون)") }),
         ("CONTRACT_SERVICE_TYPE", "Contract service type", "نوع الخدمة", new[] { ("vip", "VIP", "VIP"), ("night_shift", "Night Shift", "وردية ليلية"), ("contract_delivery", "Contract Delivery", "توصيل العقد"), ("walk_in", "Walk In", "حضور شخصي") }),
         ("CONTRACT_USAGE_TYPE", "Contract type", "نوع العقد", new[] { ("residential", "Residential", "سكني"), ("commercial", "Commercial", "تجاري") }),
         ("FEE_CYCLE", "Fee cycle", "دورة الرسوم", new[] { ("monthly", "Monthly", "شهري"), ("yearly", "Yearly", "سنوي"), ("one_time", "One time", "مرة واحدة"), ("per_m3", "Per m³", "لكل م³") }),
@@ -95,6 +95,7 @@ public class DataSeeder
             await SeedOwnerBillingAsync(companyId);
             await SeedFixedAssetAccountingAsync(companyId);
             await SeedServiceFeeMappingsAsync(companyId);
+            await SeedDeferredRevenueAndMeterStockAsync(companyId);
             await SeedChecklistsAsync();
             await SeedTermTemplatesAsync();
             await SeedBilingualSupplyTermsAsync();
@@ -423,6 +424,44 @@ public class DataSeeder
             _db.AccountMappings.Add(new AccountMapping { CompanyId = companyId, SourceType = MappingSources.InvoiceItem, SourceKeyId = key, CreditAccountId = revenue, IsActive = true });
         }
         await _db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Accounts and mappings added on 2026-11-01 (idempotent, only when the standard chart is used):
+    /// 2401 Deferred revenue – AMC (FEE_TYPE amc invoice lines credit it; recognised monthly into 4102),
+    /// 1402 Gas meters in stock (FEE_TYPE meter_purchase bill lines debit it; installed meters move to 1501),
+    /// 5105 Meter write-offs (damaged / lost / retired meters).
+    /// </summary>
+    private async Task SeedDeferredRevenueAndMeterStockAsync(long companyId)
+    {
+        async Task<long?> Ensure(string code, string parent, string type, string en, string ar)
+        {
+            var id = await _db.Accounts.IgnoreQueryFilters().Where(a => a.CompanyId == companyId && a.AccountCode == code).Select(a => (long?)a.Id).FirstOrDefaultAsync();
+            if (id != null) return id;
+            var p = await _db.Accounts.FirstOrDefaultAsync(a => a.CompanyId == companyId && a.AccountCode == parent);
+            if (p == null) return null;   // a different chart of accounts: set it up under Accounting
+            var acc = new Account
+            {
+                CompanyId = companyId, AccountCode = code, NameEn = en, NameAr = ar, AccountTypeId = await LookupId("ACCOUNT_TYPE", type), ParentAccountId = p.Id,
+                Level = (short)((p.Level ?? 1) + 1), IsGroup = false, IsPostable = true, CurrencyId = p.CurrencyId, IsActive = true,
+            };
+            _db.Accounts.Add(acc);
+            await _db.SaveChangesAsync();
+            return acc.Id;
+        }
+        async Task Map(string source, string feeCode, long? debit, long? credit)
+        {
+            var key = await _db.LookupValues.Where(v => v.LookupType!.Code == "FEE_TYPE" && v.Code == feeCode).Select(v => (long?)v.Id).FirstOrDefaultAsync();
+            if (key == null || (debit == null && credit == null)) return;
+            if (await _db.AccountMappings.AnyAsync(m => m.CompanyId == companyId && m.SourceType == source && m.SourceKeyId == key)) return;
+            _db.AccountMappings.Add(new AccountMapping { CompanyId = companyId, SourceType = source, SourceKeyId = key, DebitAccountId = debit, CreditAccountId = credit, IsActive = true });
+            await _db.SaveChangesAsync();
+        }
+        var deferred = await Ensure("2401", "2", "liability", "Deferred revenue – AMC", "إيرادات مؤجلة – عقود الصيانة");
+        var meters = await Ensure("1402", "1", "asset", "Gas meters in stock", "مخزون عدادات الغاز");
+        await Ensure("5105", "5", "expense", "Meter write-offs", "شطب العدادات");
+        await Map(MappingSources.InvoiceItem, "amc", null, deferred);
+        await Map(MappingSources.VendorBillItem, "meter_purchase", meters, null);
     }
 
     /// <summary>UAE VAT codes (standard 5% from 2018-01-01, zero-rated, exempt). Skipped when the tax_rate table is missing or already filled.</summary>

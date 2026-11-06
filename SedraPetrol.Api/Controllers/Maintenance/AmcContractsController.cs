@@ -38,6 +38,12 @@ public class AmcContractsController : ApiControllerBase
         return Ok(new PagedResult<object>(await ToDtos(page.Items), page.Total, page.Page, page.PageSize));
     }
 
+    /// <summary>Recognise the AMC revenue earned up to a date (default today): deferred revenue → maintenance revenue, per month. The daily job runs it too.</summary>
+    [HttpPost("recognize-revenue")]
+    [RequirePermission("accounting.post")]
+    public async Task<IActionResult> RecognizeRevenue([FromQuery] DateOnly? asOf) =>
+        Ok(await HttpContext.RequestServices.GetRequiredService<AmcRevenueService>().RecognizeAsync(asOf));
+
     [HttpGet("{id:long}")]
     public async Task<IActionResult> Get(long id)
     {
@@ -165,7 +171,7 @@ public class AmcContractsController : ApiControllerBase
         await using var tx = await Db.Database.BeginTransactionAsync();
         var bill = await HttpContext.RequestServices.GetRequiredService<BillingService>().CreateVendorBillAsync(a.BranchId, a.VendorId, input.BillNo.Trim(),
             input.BillDate ?? Today, s.DueDate, "amc_contract", a.Id,
-            new[] { new BillingService.BillLineInput("maintenance", null, $"AMC {a.ContractNo} – {s.Label}", 1, "each", s.Amount, input.VatRate, null) }, null, a.CurrencyId);
+            new[] { new BillingService.BillLineInput("maintenance", null, $"AMC {a.ContractNo} – {s.Label}", 1, "each", s.Amount, input.VatRate, null) }, null, a.CurrencyId, a.BuildingId);
         s.VendorBillId = bill.Id;
         s.StatusId = await LkId(LookupTypes.AmcPaymentStatus, "billed");
         await Db.SaveChangesAsync();

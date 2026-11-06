@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Domain.Entities;
@@ -112,7 +112,8 @@ public class VouchersController : ApiControllerBase
                 .Select(a => new { a.VendorBillId, no = a.VendorBill!.BillNo, a.Amount }).ToListAsync(ct);
             return Ok(new
             {
-                party, id, no = p.P.PaymentNo, type = "payment", date = p.P.PaymentDate, partyName = Loc(p.NameEn, p.NameAr), partyCode = p.Code,
+                party, id, no = p.P.PaymentNo, type = "payment", date = p.P.PaymentDate, partyId = p.P.VendorId, partyName = Loc(p.NameEn, p.NameAr), partyCode = p.Code,
+                unallocated = p.P.Amount - alloc.Sum(a => a.Amount),
                 account = "ذمم الموردين", amount = p.P.Amount, method = Code(p.P.PaymentMethodId), reference = p.P.ReferenceNo, status = Code(p.P.StatusId),
                 description = p.P.Notes, journalNo = p.Jn, by = p.By, allocations = alloc.Select(a => new { invoiceId = a.VendorBillId, a.no, a.Amount }), company,
             });

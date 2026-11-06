@@ -77,10 +77,16 @@ public class BuildingsController : ApiControllerBase
             Owner = Db.BuildingOwners.Where(o => o.BuildingId == b.Id && o.IsPrimary).Select(o => o.Party!.NameAr ?? o.Party.NameEn).FirstOrDefault(),
         });
         var page = await projected.ToPagedAsync(q, ct);
+        // tank level % = gas in the tanks now (last measurement − meter usage since), same as the building page
+        var pageIds = page.Items.Select(x => x.b.Id).ToList();
+        var tankIds = await Db.Tanks.AsNoTracking().Where(t => t.BuildingId != null && pageIds.Contains(t.BuildingId.Value)).Select(t => t.Id).ToListAsync(ct);
+        var est = await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForTanksAsync(tankIds, ct);
+        var tankBuilding = await Db.Tanks.AsNoTracking().Where(t => tankIds.Contains(t.Id)).Select(t => new { t.Id, t.BuildingId }).ToListAsync(ct);
+        decimal LevelOf(long bid) => tankBuilding.Where(t => t.BuildingId == bid).Sum(t => est.GetValueOrDefault(t.Id)?.Now ?? 0);
         var items = page.Items.Select(x => new BuildingListItem(x.b.Id, x.b.Code, Loc(x.b.NameEn, x.b.NameAr), x.b.NameEn, x.b.NameAr, x.b.BranchId,
             Loc(x.Branch?.NameEn, x.Branch?.NameAr), x.b.CityId, Loc(x.City?.NameEn, x.City?.NameAr), Code(x.b.BuildingTypeId), Label(x.b.BuildingTypeId),
             Code(x.b.StatusId) ?? (x.b.IsActive ? "active" : "inactive"), x.b.IsActive, x.b.Zone, x.Units, x.Occupied, x.Units - x.Occupied, x.Meters, x.Tanks,
-            x.Cap > 0 ? Math.Round((x.Level ?? 0) / x.Cap.Value * 100, 1) : null, x.OpenRequests, x.Owner)).ToList();
+            x.Cap > 0 ? Math.Round(LevelOf(x.b.Id) / x.Cap.Value * 100, 1) : null, x.OpenRequests, x.Owner)).ToList();
         return Ok(new PagedResult<BuildingListItem>(items, page.Total, page.Page, page.PageSize));
     }
 
@@ -146,6 +152,8 @@ public class BuildingsController : ApiControllerBase
                             }).ToListAsync(ct);
 
         var tanks = await Db.Tanks.AsNoTracking().Where(t => t.BuildingId == id).Include(t => t.GasType).OrderBy(t => t.TankNo).ToListAsync(ct);
+        var levels = await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForTanksAsync(tanks.Select(t => t.Id), ct);
+        decimal Now(Tank t) => levels.GetValueOrDefault(t.Id)?.Now ?? (t.CurrentLevelLitres ?? 0);
         var srOpen = await OpenSrStatusIds();
         var completed = await Lookups.IdOrNullAsync(LookupTypes.RefillStatus, "completed");
         var cancelled = await Lookups.IdOrNullAsync(LookupTypes.RefillStatus, "cancelled");
@@ -163,7 +171,7 @@ public class BuildingsController : ApiControllerBase
             emirate = b.City == null ? null : await Db.Emirates.AsNoTracking().Where(e => e.Id == b.City.EmirateId).Select(e => e.NameAr ?? e.NameEn).FirstOrDefaultAsync(ct),
             owners = owners.Select(o => new { o.Id, o.PartyId, name = Loc(o.NameEn, o.NameAr), o.NameEn, o.NameAr, partyType = Code(o.PartyTypeId),
                                               o.EmiratesId, o.TradeLicenseNo, o.Phone, o.Email, o.OwnershipPercentage, o.IsPrimary, o.FromDate, o.ToDate }),
-            tanks = tanks.Select(t => TanksController.ToDto(t, Code, Label, Loc)),
+            tanks = tanks.Select(t => TanksController.ToDto(t, Code, Label, Loc, levels.GetValueOrDefault(t.Id))),
             stats = new
             {
                 units = unitCount,
@@ -176,8 +184,9 @@ public class BuildingsController : ApiControllerBase
                 activeRefills = await Db.RefillRequests.CountAsync(r => r.StatusId != completed && r.StatusId != cancelled && Db.Tanks.Any(t => t.Id == r.TankId && t.BuildingId == id), ct),
                 activeAmc = await Db.AmcContracts.CountAsync(a => a.BuildingId == id && a.PremisesId == null && a.StatusId == amcActive, ct),
                 tankCapacity = tanks.Sum(t => t.CapacityLitres),
-                tankLevel = tanks.Sum(t => t.CurrentLevelLitres ?? 0),
-                tankLevelPct = tanks.Sum(t => t.CapacityLitres) > 0 ? Math.Round(tanks.Sum(t => t.CurrentLevelLitres ?? 0) / tanks.Sum(t => t.CapacityLitres) * 100, 1) : (decimal?)null,
+                tankLevel = tanks.Sum(Now),
+                tankLevelPct = tanks.Sum(t => t.CapacityLitres) > 0 ? Math.Round(tanks.Sum(Now) / tanks.Sum(t => t.CapacityLitres) * 100, 1) : (decimal?)null,
+                tankLevelRecorded = tanks.Sum(t => levels.GetValueOrDefault(t.Id)?.Recorded ?? (t.CurrentLevelLitres ?? 0)),
                 civilDefense = cd == null ? null : new { cd.Id, cd.CertificateNo, cd.ExpiryDate, status = Code(cd.StatusId) },
             }
         });

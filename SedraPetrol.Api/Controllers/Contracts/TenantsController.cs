@@ -234,9 +234,16 @@ public class TenantsController : ApiControllerBase
             .Select(i => new { Date = i.IssueDate, Ref = i.InvoiceNo, i.Id, Type = "invoice", i.InvoiceTypeId, Debit = i.TotalAmount ?? 0, Credit = 0m, i.DueDate }).ToListAsync();
         var pay = await Db.Payments.AsNoTracking().Where(p => p.TenantId == id && !deadPay.Contains(p.StatusId))
             .Select(p => new { Date = p.PaymentDate, Ref = p.ReceiptNo, p.Id, Type = "payment", InvoiceTypeId = p.PaymentMethodId, Debit = 0m, Credit = p.Amount, DueDate = (DateOnly?)null }).ToListAsync();
+        // credit notes (credit) and refunds of customer credit (debit), posted only — same rows as /api/statements, so both agree with the ledger
+        var cns = await Db.CreditNotes.AsNoTracking().Where(x => x.TenantId == id && x.Status == "posted")
+            .Select(x => new { Date = x.IssueDate, Ref = x.CreditNoteNo, x.Id, Type = "credit_note", InvoiceTypeId = (long?)null, Debit = 0m, Credit = x.TotalAmount, DueDate = (DateOnly?)null }).ToListAsync();
+        var refunds = await Db.CustomerRefunds.AsNoTracking().Where(x => x.TenantId == id && x.Status == "posted")
+            .Select(x => new { Date = x.RefundDate, Ref = x.RefundNo, x.Id, Type = "refund", InvoiceTypeId = x.PaymentMethodId, Debit = x.Amount, Credit = 0m, DueDate = (DateOnly?)null }).ToListAsync();
         var lines = inv.Select(i => new { i.Date, i.Ref, i.Id, i.Type, i.InvoiceTypeId, i.Debit, i.Credit, DueDate = (DateOnly?)i.DueDate })
             .Concat(pay.Select(p => new { p.Date, p.Ref, p.Id, p.Type, p.InvoiceTypeId, p.Debit, p.Credit, p.DueDate }))
-            .OrderBy(l => l.Date).ThenBy(l => l.Type == "payment").ToList();
+            .Concat(cns.Select(x => new { x.Date, x.Ref, x.Id, x.Type, x.InvoiceTypeId, x.Debit, x.Credit, x.DueDate }))
+            .Concat(refunds.Select(x => new { x.Date, x.Ref, x.Id, x.Type, x.InvoiceTypeId, x.Debit, x.Credit, x.DueDate }))
+            .OrderBy(l => l.Date).ThenBy(l => l.Type == "invoice" ? 0 : l.Type == "payment" ? 1 : l.Type == "credit_note" ? 2 : 3).ToList();
         var opening = lines.Where(l => from != null && l.Date < from).Sum(l => l.Debit - l.Credit);
         var running = opening;
         var rows = lines.Where(l => (from == null || l.Date >= from) && (to == null || l.Date <= to)).Select(l =>

@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Domain.Entities;
@@ -18,7 +18,11 @@ public class MetersController : ApiControllerBase
         DateOnly? InstallDate, decimal? InitialReading, DateOnly? CalibrationDate, string? Location, string? SimCard, string? Status, string? Notes);
     public record AssignInput(long UnitId, DateOnly? FromDate);
     /// <summary>Add several meters of the same model to stock: one serial per meter.</summary>
-    public record StockBulkInput(long? BranchId, List<string> Serials, string? Type, string? Brand, string? Model, DateOnly? CalibrationDate, decimal? InitialReading, string? Notes);
+    /// <param name="PurchaseBillId">Supplier bill the meters were bought on (a bill line of type «Gas meters purchase»). The meters take their cost
+    /// from it (line amount ÷ quantity, without VAT) and their cost sits in «meters in stock» until they are installed.</param>
+    /// <param name="UnitCost">Cost per meter; default = the bill's meter lines amount ÷ quantity.</param>
+    public record StockBulkInput(long? BranchId, List<string> Serials, string? Type, string? Brand, string? Model, DateOnly? CalibrationDate, decimal? InitialReading, string? Notes,
+        long? PurchaseBillId = null, decimal? UnitCost = null);
     public record UnassignInput(DateOnly? ToDate, decimal? FinalReading);
     public record ReadingInput(decimal ReadingValue, DateTimeOffset? ReadingDate, string? Method, string? Notes, bool AllowReset = false, bool IssueInvoice = false);
 
@@ -150,7 +154,10 @@ public class MetersController : ApiControllerBase
     [HttpPost("stock")]
     public async Task<IActionResult> AddToStock([FromBody] StockBulkInput input)
     {
-        var branchId = RequireBranch(input.BranchId);
+        // meters bought on a bill belong to the bill's branch (its stock account balance is per branch)
+        var billBranch = input.PurchaseBillId == null ? null
+            : await Db.VendorBills.Where(b => b.Id == input.PurchaseBillId).Select(b => (long?)b.BranchId).FirstOrDefaultAsync();
+        var branchId = RequireBranch(input.BranchId ?? billBranch);
         EnsureBranchAccess(branchId);
         var serials = (input.Serials ?? new()).Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
         if (serials.Count == 0) throw new AppException("Enter at least one serial number.");
@@ -159,6 +166,25 @@ public class MetersController : ApiControllerBase
         if (dup.Count > 0) throw new AppException($"Repeated serial numbers: {string.Join(", ", dup)}");
         var existing = await Db.Meters.IgnoreQueryFilters().Where(m => serials.Contains(m.SerialNo)).Select(m => m.SerialNo).ToListAsync();
         if (existing.Count > 0) throw new BusinessRuleException($"Already registered: {string.Join(", ", existing)}");
+
+        // purchase bill: meters take their cost from its «meter_purchase» lines and cannot exceed the quantity bought
+        VendorBill? bill = null; decimal? unitCost = input.UnitCost;
+        if (input.PurchaseBillId != null)
+        {
+            bill = await Db.VendorBills.FirstOrDefaultAsync(b => b.Id == input.PurchaseBillId) ?? throw new NotFoundException("VendorBill", input.PurchaseBillId.Value);
+            if (await Lookups.CodeAsync(bill.StatusId) is "cancelled" or "draft") throw new BusinessRuleException($"Bill {bill.BillNo} is cancelled.");
+            if (bill.BranchId != branchId)
+                throw new BusinessRuleException($"Bill {bill.BillNo} belongs to another branch. Add its meters to the stock of that branch.");
+            var meterType = await Lookups.IdOrNullAsync(LookupTypes.FeeType, "meter_purchase");
+            var lines = await Db.VendorBillItems.Where(i => i.BillId == bill.Id && i.ItemTypeId == meterType).Select(i => new { i.Quantity, i.Amount }).ToListAsync();
+            var qty = lines.Sum(l => l.Quantity ?? 0);
+            if (qty <= 0) throw new BusinessRuleException($"Bill {bill.BillNo} has no «Gas meters purchase» line.");
+            var linked = await Db.Meters.CountAsync(m => m.PurchaseBillId == bill.Id);
+            if (linked + serials.Count > qty)
+                throw new BusinessRuleException($"Bill {bill.BillNo} is for {qty:0} meters; {linked} are already registered, so at most {qty - linked:0} more can be added.");
+            unitCost ??= BillingService.R2(lines.Sum(l => l.Amount ?? 0) / qty);
+        }
+        if (unitCost is < 0) throw new AppException("The meter cost cannot be negative.");
 
         var typeId = await Lk(LookupTypes.MeterType, null, input.Type ?? "standard", field: "type");
         var stock = await LkId(LookupTypes.MeterStatus, "in_stock");
@@ -171,6 +197,9 @@ public class MetersController : ApiControllerBase
                 BranchId = branchId, MeterNo = await Numbers.NextAsync(NumberPrefixes.Meter, yearly: false), SerialNo = serial, IsActive = true,
                 MeterTypeId = typeId, Brand = input.Brand, Model = input.Model, CalibrationDate = input.CalibrationDate,
                 InitialReading = input.InitialReading ?? 0, LocationNote = input.Notes, StatusId = stock,
+                PurchaseCost = unitCost, PurchaseBillId = bill?.Id, PurchaseDate = bill?.BillDate,
+                // the cost is in the ledger (1402) only when it came from a purchase bill
+                CostLocation = bill != null && (unitCost ?? 0) > 0 ? "stock" : null,
             };
             Db.Meters.Add(m);
             await Db.SaveChangesAsync();
@@ -179,7 +208,7 @@ public class MetersController : ApiControllerBase
         }
         await Db.SaveChangesAsync();
         await tx.CommitAsync();
-        return Ok(created.Select(m => new { m.Id, m.MeterNo, serial = m.SerialNo }));
+        return Ok(created.Select(m => new { m.Id, m.MeterNo, serial = m.SerialNo, cost = m.PurchaseCost, billNo = bill?.BillNo }));
     }
 
     [HttpPost("{id:long}/unassign")]
@@ -210,8 +239,7 @@ public class MetersController : ApiControllerBase
     public async Task<IActionResult> AddReading(long id, [FromBody] ReadingInput input)
     {
         var m = await Load(id);
-        if (await Lookups.CodeAsync(m.StatusId) is "retired" or "lost")
-            throw new BusinessRuleException($"Meter {m.MeterNo} is retired / lost; readings cannot be recorded.");
+        await Ops.EnsureAcceptsReadingsAsync(m);
         var r = await Ops.AddReadingAsync(m, input.ReadingValue, input.ReadingDate ?? DateTimeOffset.UtcNow, input.Method, input.Notes, input.AllowReset);
         if (!input.IssueInvoice) return Ok(new { r.Id, r.ReadingDate, r.ReadingValue, r.Consumption });
 
@@ -304,6 +332,7 @@ public class MetersController : ApiControllerBase
                 r.M.Id, meterNo = r.M.MeterNo, serial = r.M.SerialNo, unitId = r.UnitId, unit = r.UnitNo, floor = r.Floor,
                 buildingId = r.BuildingId, buildingCode = r.BCode, building = Loc(r.BEn, r.BAr),
                 type = Code(r.M.MeterTypeId), typeLabel = Label(r.M.MeterTypeId), status = Code(r.M.StatusId), statusLabel = Label(r.M.StatusId),
+                purchaseCost = r.M.PurchaseCost, purchaseBillId = r.M.PurchaseBillId, purchaseDate = r.M.PurchaseDate, costLocation = r.M.CostLocation,
                 installDate = r.M.InstallDate, lastRead = lr?.ReadingDate, lastReadValue = lr?.ReadingValue ?? r.M.InitialReading ?? 0,
                 monthlyAvg = Math.Round(sums.GetValueOrDefault(r.M.Id) / 6m, 2), unbilledM3 = unbilled.GetValueOrDefault(r.M.Id),
                 balance = c == null ? 0 : balances.GetValueOrDefault(c.Id)?.Outstanding ?? 0,
@@ -360,6 +389,10 @@ public class MetersController : ApiControllerBase
         }
         m.StatusId = newId;
         m.IsActive = code is not ("retired" or "lost");
+        // a lost / retired meter's cost is written off (5105); if it comes back, the cost returns to stock
+        var ops = HttpContext.RequestServices.GetRequiredService<MeterOps>();
+        if (code is "retired" or "lost") await ops.MoveCostAsync(m, "written_off", date, null, $"{code} — {input.Reason?.Trim()}");
+        else if (m.CostLocation == "written_off") await ops.MoveCostAsync(m, "stock", date, null, $"back in stock ({code})");
         Activity.Log("meter", m.Id, "status",
             $"Meter {m.MeterNo}: {oldLabel ?? oldCode ?? "—"} → {Label(newId)}{(string.IsNullOrWhiteSpace(input.Reason) ? "" : $" — {input.Reason.Trim()}")}",
             assignment?.Unit?.BuildingId, m.BranchId,
@@ -430,6 +463,7 @@ public class MeterReadingsController : ApiControllerBase
                                             : await Db.Meters.FirstOrDefaultAsync(x => x.MeterNo == row.MeterNo);
                 if (m == null) throw new AppException("Meter not found.");
                 EnsureBranchAccess(m.BranchId);
+                await ops.EnsureAcceptsReadingsAsync(m);
                 var r = await ops.AddReadingAsync(m, row.ReadingValue, row.ReadingDate ?? DateTimeOffset.UtcNow, row.Method, row.Notes);
                 results.Add(new { row.MeterId, row.MeterNo, ok = true, r.Id, r.Consumption });
             }

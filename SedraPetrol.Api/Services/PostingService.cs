@@ -64,7 +64,7 @@ public class PostingService
     {
         var companyId = await CompanyIdAsync(branchId);
         var lineList = lines.Where(l => l.Debit != 0 || l.Credit != 0).ToList();
-        if (lineList.Count < 2) throw new AppException("A journal entry needs at least two lines.");
+        if (lineList.Count < 2) throw new NothingToPostException();
         foreach (var l in lineList)
             if ((l.Debit == 0) == (l.Credit == 0) || l.Debit < 0 || l.Credit < 0)
                 throw new AppException("Each journal line must have either a positive debit or a positive credit.");
@@ -73,7 +73,8 @@ public class PostingService
         if (dr != cr) throw new AppException($"Journal entry is not balanced (debit {dr} ≠ credit {cr}).");
 
         var period = await _db.FiscalPeriods.FirstOrDefaultAsync(p => p.CompanyId == companyId && p.StartDate <= date && p.EndDate >= date)
-                     ?? throw new AppException($"No fiscal period covers {date:yyyy-MM-dd}. Create it under Accounting > Fiscal periods.");
+                     // a document without its journal would split the sub-ledgers from the GL, so this stops the save (like a closed period)
+                     ?? throw new BusinessRuleException($"No fiscal period covers {date:yyyy-MM-dd}. Create it under Accounting > Fiscal periods.");
         if (period.IsClosed) throw new BusinessRuleException($"Fiscal period {period.Year}-{period.PeriodNo:00} is closed.");
 
         var accountIds = lineList.Select(l => l.AccountId).Distinct().ToList();
@@ -120,13 +121,28 @@ public class PostingService
         return entry;
     }
 
+    /// <summary>
+    /// A document that cannot get its journal entry (missing account mapping, unbalanced lines, inactive account) is NOT saved:
+    /// the exception rolls the document back, so the sub-ledgers always agree with the GL. Only a document with nothing to post
+    /// (all amounts zero) is kept without a journal.
+    /// </summary>
+    private static BusinessRuleException Missing(string what) =>
+        new($"No ledger account is set up for {what}. Set it under Accounting > Account mappings, then save again.");
+
+    private async Task<string> NameOfAsync(long? lookupId)
+    {
+        if (lookupId == null) return "—";
+        var v = await _lookups.GetAsync(lookupId);
+        return v?.NameEn ?? v?.Code ?? lookupId.ToString()!;
+    }
+
     private async Task<JournalEntry?> TryAsync(Func<Task<JournalEntry?>> build, string what)
     {
         try
         {
             return await build();
         }
-        catch (AppException ex) when (ex is not BusinessRuleException)
+        catch (NothingToPostException ex)
         {
             _log.LogWarning("Journal for {What} was not created: {Message}", what, ex.Message);
             return null;
@@ -138,12 +154,12 @@ public class PostingService
     {
         var companyId = await CompanyIdAsync(inv.BranchId);
         var ar = await _parties.AccountIdAsync(inv.TenantId) ?? await MapAsync(companyId, inv.BranchId, MappingSources.Receivable, null, true);
-        if (ar == null) return null;
+        if (ar == null) throw Missing("customer receivables (A/R)");
         var lines = new List<Line> { new(ar.Value, inv.TotalAmount ?? 0, 0, $"Invoice {inv.InvoiceNo}", inv.BuildingId, null, inv.TenantId, null, inv.ContractId) };
         foreach (var it in items)
         {
             var acc = await MapAsync(companyId, inv.BranchId, MappingSources.InvoiceItem, it.ItemTypeId, false);
-            if (acc == null) return null;
+            if (acc == null) throw Missing($"revenue of «{await NameOfAsync(it.ItemTypeId)}» (invoice item)");
             lines.Add(new(acc.Value, 0, it.Amount ?? 0, it.Description, inv.BuildingId, null, inv.TenantId, null, inv.ContractId));
         }
         if ((inv.VatAmount ?? 0) > 0)
@@ -156,11 +172,11 @@ public class PostingService
             foreach (var g in groups)
             {
                 var acc = g.AccountId ?? fallback;
-                if (acc == null) return null;
+                if (acc == null) throw Missing("output VAT");
                 var amt = Math.Round(g.Vat, 2, MidpointRounding.AwayFromZero);
                 parts.Add((acc.Value, amt)); posted += amt;
             }
-            if (parts.Count == 0) { if (fallback == null) return null; parts.Add((fallback.Value, 0)); }
+            if (parts.Count == 0) { if (fallback == null) throw Missing("output VAT"); parts.Add((fallback.Value, 0)); }
             var diff = inv.VatAmount!.Value - posted;
             if (diff != 0) { var i0 = parts.FindIndex(q => q.Amt == parts.Max(x => x.Amt)); parts[i0] = (parts[i0].Acc, parts[i0].Amt + diff); }
             foreach (var p in parts.GroupBy(q => q.Acc).Select(q => (Acc: q.Key, Amt: q.Sum(x => x.Amt))).Where(q => q.Amt != 0))
@@ -175,7 +191,7 @@ public class PostingService
         var companyId = await CompanyIdAsync(pay.BranchId);
         var cash = await MapAsync(companyId, pay.BranchId, MappingSources.Payment, pay.PaymentMethodId, true);
         var ar = await _parties.AccountIdAsync(pay.TenantId) ?? await MapAsync(companyId, pay.BranchId, MappingSources.Receivable, null, true);
-        if (cash == null || ar == null) return null;
+        if (cash == null) throw Missing($"receipts by «{await NameOfAsync(pay.PaymentMethodId)}» (cash / bank account)"); if (ar == null) throw Missing("customer receivables (A/R)");
         return await CreateEntryAsync(pay.BranchId, pay.PaymentDate, $"Receipt {pay.ReceiptNo}", "payment", pay.Id, new[]
         {
             new Line(cash.Value, pay.Amount, 0, $"Receipt {pay.ReceiptNo}", TenantId: pay.TenantId),
@@ -188,19 +204,19 @@ public class PostingService
     {
         var companyId = await CompanyIdAsync(cn.BranchId);
         var ar = await _parties.AccountIdAsync(cn.TenantId) ?? await MapAsync(companyId, cn.BranchId, MappingSources.Receivable, null, true);
-        if (ar == null) return null;
+        if (ar == null) throw Missing("customer receivables (A/R)");
         var text = $"Credit note {cn.CreditNoteNo}";
         var jl = new List<Line>();
         foreach (var l in lines.Where(x => x.Amount > 0))
         {
             var acc = await MapAsync(companyId, cn.BranchId, MappingSources.InvoiceItem, l.ItemTypeId, false);
-            if (acc == null) return null;
+            if (acc == null) throw Missing($"revenue of «{await NameOfAsync(l.ItemTypeId)}» (credit note line)");
             jl.Add(new(acc.Value, l.Amount, 0, l.Description ?? text, cn.BuildingId, null, cn.TenantId, null, cn.ContractId));
         }
         if (cn.VatAmount > 0)
         {
             var vat = await MapAsync(companyId, cn.BranchId, MappingSources.Vat, null, false);
-            if (vat == null) return null;
+            if (vat == null) throw Missing("output VAT");
             jl.Add(new(vat.Value, cn.VatAmount, 0, "Output VAT reversal", cn.BuildingId, null, cn.TenantId, null, cn.ContractId));
         }
         jl.Add(new(ar.Value, 0, cn.TotalAmount, text, cn.BuildingId, null, cn.TenantId, null, cn.ContractId));
@@ -213,7 +229,7 @@ public class PostingService
         var companyId = await CompanyIdAsync(r.BranchId);
         var ar = await _parties.AccountIdAsync(r.TenantId) ?? await MapAsync(companyId, r.BranchId, MappingSources.Receivable, null, true);
         var cash = await MapAsync(companyId, r.BranchId, MappingSources.Payment, r.PaymentMethodId, true);
-        if (ar == null || cash == null) return null;
+        if (cash == null) throw Missing($"refunds by «{await NameOfAsync(r.PaymentMethodId)}» (cash / bank account)"); if (ar == null) throw Missing("customer receivables (A/R)");
         var text = $"Customer refund {r.RefundNo}";
         return await CreateEntryAsync(r.BranchId, r.RefundDate, text, "customer_refund", r.Id, new[]
         {
@@ -227,13 +243,13 @@ public class PostingService
     {
         var companyId = await CompanyIdAsync(bill.BranchId);
         var ap = await _parties.AccountIdAsync(bill.VendorId) ?? await MapAsync(companyId, bill.BranchId, MappingSources.Payable, null, false);
-        if (ap == null) return null;
+        if (ap == null) throw Missing("supplier payables (A/P)");
         var lines = new List<Line>();
         foreach (var it in items)
         {
             var acc = it.ExpenseAccountId ?? await MapAsync(companyId, bill.BranchId, MappingSources.VendorBillItem, it.ItemTypeId, true);
-            if (acc == null) return null;
-            lines.Add(new(acc.Value, it.Amount ?? 0, 0, it.Description, VendorId: bill.VendorId));
+            if (acc == null) throw Missing($"expense of «{await NameOfAsync(it.ItemTypeId)}» (bill item)");
+            lines.Add(new(acc.Value, it.Amount ?? 0, 0, it.Description, BuildingId: bill.BuildingId, VendorId: bill.VendorId));
         }
         if ((bill.VatAmount ?? 0) > 0)
         {
@@ -244,17 +260,17 @@ public class PostingService
             foreach (var g in groups)
             {
                 var acc = g.AccountId ?? fallback;
-                if (acc == null) return null;
+                if (acc == null) throw Missing("input VAT");
                 var amt = Math.Round(g.Vat, 2, MidpointRounding.AwayFromZero);
                 parts.Add((acc.Value, amt)); posted += amt;
             }
-            if (parts.Count == 0) { if (fallback == null) return null; parts.Add((fallback.Value, 0)); }
+            if (parts.Count == 0) { if (fallback == null) throw Missing("input VAT"); parts.Add((fallback.Value, 0)); }
             var diff = bill.VatAmount!.Value - posted;
             if (diff != 0) { var i0 = parts.FindIndex(q => q.Amt == parts.Max(x => x.Amt)); parts[i0] = (parts[i0].Acc, parts[i0].Amt + diff); }
             foreach (var p in parts.GroupBy(q => q.Acc).Select(q => (Acc: q.Key, Amt: q.Sum(x => x.Amt))).Where(q => q.Amt != 0))
-                lines.Add(new(p.Acc, p.Amt, 0, "Input VAT", VendorId: bill.VendorId));
+                lines.Add(new(p.Acc, p.Amt, 0, "Input VAT", BuildingId: bill.BuildingId, VendorId: bill.VendorId));
         }
-        lines.Add(new(ap.Value, 0, bill.TotalAmount ?? 0, $"Bill {bill.BillNo}", VendorId: bill.VendorId));
+        lines.Add(new(ap.Value, 0, bill.TotalAmount ?? 0, $"Bill {bill.BillNo}", BuildingId: bill.BuildingId, VendorId: bill.VendorId));
         return await CreateEntryAsync(bill.BranchId, bill.BillDate, $"Vendor bill {bill.BillNo}", "vendor_bill", bill.Id, lines, true, bill.CurrencyId);
     }, $"vendor bill {bill.BillNo}");
 
@@ -264,7 +280,7 @@ public class PostingService
         var companyId = await CompanyIdAsync(vp.BranchId);
         var ap = await _parties.AccountIdAsync(vp.VendorId) ?? await MapAsync(companyId, vp.BranchId, MappingSources.Payable, null, false);
         var bank = await MapAsync(companyId, vp.BranchId, MappingSources.VendorPayment, vp.PaymentMethodId, false);
-        if (ap == null || bank == null) return null;
+        if (bank == null) throw Missing($"supplier payments by «{await NameOfAsync(vp.PaymentMethodId)}» (cash / bank account)"); if (ap == null) throw Missing("supplier payables (A/P)");
         return await CreateEntryAsync(vp.BranchId, vp.PaymentDate, $"Vendor payment {vp.PaymentNo}", "vendor_payment", vp.Id, new[]
         {
             new Line(ap.Value, vp.Amount, 0, $"Vendor payment {vp.PaymentNo}", VendorId: vp.VendorId),
@@ -318,4 +334,10 @@ public class PostingService
         await _db.SaveChangesAsync();
         return rev;
     }
+}
+
+/// <summary>All lines of the entry are zero (e.g. a free invoice): the document is kept without a journal.</summary>
+public class NothingToPostException : AppException
+{
+    public NothingToPostException() : base("A journal entry needs at least two lines.") { }
 }

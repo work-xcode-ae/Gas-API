@@ -246,11 +246,21 @@ public class TaxRatesController : ApiControllerBase
         foreach (var c in new[] { "draft", "cancelled" })
             if (await Lookups.IdOrNullAsync(LookupTypes.InvoiceStatus, c) is long lid) deadInv.Add(lid);
         var deadBill = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "cancelled");
+        // refundable deposits are a liability (customer money held), not a supply: they never belong in the VAT return
+        var depositType = await Lookups.IdOrNullAsync(LookupTypes.FeeType, "deposit");
         var sales = await Db.InvoiceItems
             .Join(Db.Invoices, i => i.InvoiceId, v => v.Id, (i, v) => new { i, v })
-            .Where(x => x.v.IssueDate >= from && x.v.IssueDate <= to && !deadInv.Contains(x.v.StatusId))
+            .Where(x => x.v.IssueDate >= from && x.v.IssueDate <= to && !deadInv.Contains(x.v.StatusId) && x.i.ItemTypeId != depositType)
             .GroupBy(x => new { x.i.TaxRateId, x.i.VatRate })
             .Select(g => new { g.Key.TaxRateId, g.Key.VatRate, Net = g.Sum(x => x.i.Amount ?? 0) }).ToListAsync();
+        // posted credit notes of the period reduce the supplies of the tax code / rate of the credited line
+        var credits = await Db.CreditNoteLines.Where(l => l.CreditNote!.Status == "posted" && l.CreditNote.IssueDate >= from && l.CreditNote.IssueDate <= to && l.ItemTypeId != depositType)
+            .Select(l => new { TaxRateId = l.InvoiceItem != null ? l.InvoiceItem.TaxRateId : null, l.VatRate, l.Amount })
+            .ToListAsync();
+        sales = sales.Select(x => new { x.TaxRateId, x.VatRate, Net = x.Net - credits.Where(c => c.TaxRateId == x.TaxRateId && c.VatRate == x.VatRate).Sum(c => c.Amount) })
+            .Concat(credits.Where(c => !sales.Any(x => x.TaxRateId == c.TaxRateId && x.VatRate == c.VatRate)).GroupBy(c => new { c.TaxRateId, c.VatRate })
+                .Select(g => new { g.Key.TaxRateId, VatRate = (decimal?)g.Key.VatRate, Net = -g.Sum(c => c.Amount) }))
+            .ToList();
         var purchases = await Db.VendorBillItems
             .Join(Db.VendorBills, i => i.BillId, b => b.Id, (i, b) => new { i, b })
             .Where(x => x.b.BillDate >= from && x.b.BillDate <= to && x.b.StatusId != deadBill)

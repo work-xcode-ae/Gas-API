@@ -27,7 +27,14 @@ public class TanksController : ApiControllerBase
         if (buildingId != null) query = query.Where(t => t.BuildingId == buildingId);
         if (branchId != null) query = query.Where(t => t.BranchId == branchId);
         if (!string.IsNullOrEmpty(status)) { var s = await Lookups.IdOrNullAsync(LookupTypes.TankStatus, status); query = query.Where(t => t.StatusId == s); }
-        if (lowOnly) query = query.Where(t => t.CapacityLitres > 0 && (t.CurrentLevelLitres ?? 0) * 100 / t.CapacityLitres < TankRules.LowLevelPercent);
+        var estimator = HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>();
+        if (lowOnly)
+        {
+            // «low» is judged on the gas in the tank now (last measurement − meter usage since), not the last typed-in level
+            var est = await estimator.ForQueryAsync(query.Where(t => t.CapacityLitres > 0), ct);
+            var lowIds = est.Values.Where(e => e.IsLow).Select(e => e.TankId).ToList();
+            query = query.Where(t => lowIds.Contains(t.Id));
+        }
         if (!string.IsNullOrWhiteSpace(q.Search)) query = query.Where(t => t.TankNo.Contains(q.Search) || t.Building!.Code.Contains(q.Search) || (t.Building.NameAr ?? "").Contains(q.Search));
         var page = await query.OrderBy(t => t.BuildingId).ThenBy(t => t.TankNo)
             .Select(t => new
@@ -36,10 +43,11 @@ public class TanksController : ApiControllerBase
                 LastRefill = Db.TankRefills.Where(r => r.TankId == t.Id).Max(r => (DateTimeOffset?)r.RefillDatetime),
                 OpenRequest = Db.RefillRequests.Where(r => r.TankId == t.Id && r.CompletedAt == null).OrderByDescending(r => r.Id).Select(r => r.RequestNo).FirstOrDefault(),
             }).ToPagedAsync(q, ct);
+        var levels = await estimator.ForTanksAsync(page.Items.Select(x => x.Tank.Id), ct);
         var items = page.Items.Select(x =>
         {
             x.Tank.GasType = x.GasType;
-            return (object)new { tank = ToDto(x.Tank, Code, Label, Loc), buildingCode = x.BuildingCode, building = Loc(x.NameEn, x.NameAr), lastRefill = x.LastRefill, openRequest = x.OpenRequest };
+            return (object)new { tank = ToDto(x.Tank, Code, Label, Loc, levels.GetValueOrDefault(x.Tank.Id)), buildingCode = x.BuildingCode, building = Loc(x.NameEn, x.NameAr), lastRefill = x.LastRefill, openRequest = x.OpenRequest };
         }).ToList();
         return Ok(new PagedResult<object>(items, page.Total, page.Page, page.PageSize));
     }
@@ -49,7 +57,8 @@ public class TanksController : ApiControllerBase
     {
         await LoadLookups();
         var t = await Db.Tanks.AsNoTracking().Include(x => x.GasType).FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("Tank", id);
-        return Ok(ToDto(t, Code, Label, Loc));
+        var level = (await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForTanksAsync(new[] { id })).GetValueOrDefault(id);
+        return Ok(ToDto(t, Code, Label, Loc, level));
     }
 
     [HttpPost]
@@ -181,14 +190,32 @@ public class TanksController : ApiControllerBase
             t.StatusId = await lookups.IdOrNullAsync(LookupTypes.TankStatus, level * 100 / t.CapacityLitres < TankRules.LowLevelPercent ? "low" : "ok");
     }
 
-    internal static object ToDto(Tank t, Func<long?, string?> code, Func<long?, string?> label, Func<string?, string?, string?> loc) => new
+    /// <param name="est">Estimated level now (TankLevelEstimator). currentLevel / levelPct / status show the gas in the tank NOW;
+    /// recordedLevel / recordedAt are the last measurement and usedSinceRecord what the meters used since.</param>
+    internal static object ToDto(Tank t, Func<long?, string?> code, Func<long?, string?> label, Func<string?, string?, string?> loc, TankLevelEstimator.Level? est = null)
+    {
+        var level = est?.Now ?? (t.CurrentLevelLitres ?? 0);
+        var st = code(t.StatusId);
+        string? stLabel = label(t.StatusId);
+        if (est != null && st is null or "ok" or "low")
+        {
+            var now = est.IsLow ? "low" : "ok";
+            if (now != st) { st = now; stLabel = now == "low" ? loc("Low", "منخفض") : loc("OK", "جيد"); }
+        }
+        return ToDtoCore(t, code, label, loc, level, est, st, stLabel);
+    }
+
+    private static object ToDtoCore(Tank t, Func<long?, string?> code, Func<long?, string?> label, Func<string?, string?, string?> loc, decimal level,
+        TankLevelEstimator.Level? est, string? status, string? statusLabel) => new
     {
         t.Id, t.BuildingId, t.BranchId, t.TankNo, t.GasTypeId, gasType = t.GasType?.Code, gasTypeName = loc(t.GasType?.NameEn, t.GasType?.NameAr),
-        t.CapacityLitres, currentLevel = t.CurrentLevelLitres ?? 0,
-        levelPct = t.CapacityLitres > 0 ? Math.Round((t.CurrentLevelLitres ?? 0) / t.CapacityLitres * 100, 1) : 0,
-        currentLevelM3 = t.GasType == null ? (decimal?)null : Math.Round((t.CurrentLevelLitres ?? 0) * t.GasType.LitreToM3, 3),
+        t.CapacityLitres, currentLevel = level,
+        levelPct = t.CapacityLitres > 0 ? Math.Round(level / t.CapacityLitres * 100, 1) : 0,
+        currentLevelM3 = t.GasType == null ? (decimal?)null : Math.Round(level * t.GasType.LitreToM3, 3),
+        recordedLevel = est?.Recorded ?? (t.CurrentLevelLitres ?? 0), recordedAt = est?.RecordedAt, usedSinceRecord = est?.Used ?? 0,
+        levelEstimated = est != null && est.Used > 0,
         t.SerialNo, t.Manufacturer, t.InstallDate, t.LastInspectionDate, t.NextInspectionDate,
-        status = code(t.StatusId), statusLabel = label(t.StatusId), t.IsActive,
+        status, statusLabel, t.IsActive,
     };
 }
 

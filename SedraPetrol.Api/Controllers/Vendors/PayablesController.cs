@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Domain.Entities;
@@ -14,33 +14,40 @@ public class VendorBillsController : ApiControllerBase
 {
     private BillingService Billing => HttpContext.RequestServices.GetRequiredService<BillingService>();
 
-    public record CreateInput(long? BranchId, long VendorId, string BillNo, DateOnly? BillDate, DateOnly? DueDate, string? Notes, List<BillingService.BillLineInput> Items);
+    /// <param name="BuildingId">Optional: the building this cost belongs to (building profit report).</param>
+    public record CreateInput(long? BranchId, long VendorId, string BillNo, DateOnly? BillDate, DateOnly? DueDate, string? Notes, List<BillingService.BillLineInput> Items, long? BuildingId = null);
 
     [HttpGet]
     public async Task<IActionResult> List([FromQuery] PageQuery q, [FromQuery] long? vendorId, [FromQuery] string? status, [FromQuery] string? sourceType,
-        [FromQuery] DateOnly? from, [FromQuery] DateOnly? to, [FromQuery] bool openOnly = false, CancellationToken ct = default)
+        [FromQuery] DateOnly? from, [FromQuery] DateOnly? to, [FromQuery] bool openOnly = false, [FromQuery] long? buildingId = null, [FromQuery] string? itemType = null,
+        CancellationToken ct = default)
     {
         await LoadLookups();
         var query = Db.VendorBills.AsNoTracking().Where(b => Me.IsAdmin || Me.BranchIds.Count == 0 || Me.BranchIds.Contains(b.BranchId));
         if (vendorId != null) query = query.Where(b => b.VendorId == vendorId);
+        if (buildingId != null) query = query.Where(b => b.BuildingId == buildingId);
+        // e.g. itemType=meter_purchase: only bills with a «gas meters (stock)» line (Meters › add to stock)
+        if (!string.IsNullOrEmpty(itemType)) { var it = await Lookups.IdOrNullAsync(LookupTypes.FeeType, itemType); query = query.Where(b => Db.VendorBillItems.Any(i => i.BillId == b.Id && i.ItemTypeId == it)); }
         if (sourceType != null) query = query.Where(b => b.SourceType == sourceType);
         if (from != null) query = query.Where(b => b.BillDate >= from);
         if (to != null) query = query.Where(b => b.BillDate <= to);
         if (!string.IsNullOrEmpty(status)) { var s = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, status); query = query.Where(b => b.StatusId == s); }
         if (openOnly)
         {
-            var open = new[] { await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "pending"), await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "partial") };
+            var open = new[] { await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "pending"), await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "partial"),
+                               await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "overdue") };
             query = query.Where(b => open.Contains(b.StatusId));
         }
         if (!string.IsNullOrWhiteSpace(q.Search)) query = query.Where(b => b.BillNo.Contains(q.Search) || (b.Vendor!.Party!.NameAr ?? "").Contains(q.Search) || (b.Vendor.Party!.NameEn ?? "").Contains(q.Search));
         var page = await query.OrderByDescending(b => b.BillDate).ThenByDescending(b => b.Id)
-            .Select(b => new { B = b, b.Vendor!.Party!.NameEn, b.Vendor.Party!.NameAr }).ToPagedAsync(q, ct);
+            .Select(b => new { B = b, b.Vendor!.Party!.NameEn, b.Vendor.Party!.NameAr, BCode = b.Building!.Code, BEn = b.Building.NameEn, BAr = b.Building.NameAr }).ToPagedAsync(q, ct);
         var paid = await Billing.PaidByBillAsync(page.Items.Select(x => x.B.Id));
         return Ok(new PagedResult<object>(page.Items.Select(x => (object)new
         {
-            x.B.Id, x.B.BillNo, x.B.VendorId, vendor = Loc(x.NameEn, x.NameAr), x.B.BillDate, x.B.DueDate, x.B.SourceType, x.B.SourceId,
+            x.B.Id, x.B.BillNo, x.B.BranchId, x.B.VendorId, vendor = Loc(x.NameEn, x.NameAr), x.B.BillDate, x.B.DueDate, x.B.SourceType, x.B.SourceId,
             x.B.Subtotal, x.B.VatAmount, x.B.TotalAmount, paid = paid.GetValueOrDefault(x.B.Id), balance = (x.B.TotalAmount ?? 0) - paid.GetValueOrDefault(x.B.Id),
             status = Code(x.B.StatusId), statusLabel = Label(x.B.StatusId), x.B.Notes, x.B.JournalEntryId,
+            x.B.BuildingId, buildingCode = x.BCode, building = x.B.BuildingId == null ? null : Loc(x.BEn, x.BAr),
         }).ToList(), page.Total, page.Page, page.PageSize));
     }
 
@@ -64,7 +71,7 @@ public class VendorBillsController : ApiControllerBase
         if (await Db.VendorBills.AnyAsync(b => b.VendorId == input.VendorId && b.BillNo == input.BillNo.Trim()))
             throw new BusinessRuleException($"Invoice {input.BillNo} of this vendor is already recorded.");
         await using var tx = await Db.Database.BeginTransactionAsync();
-        var bill = await Billing.CreateVendorBillAsync(branchId, input.VendorId, input.BillNo.Trim(), input.BillDate ?? Today, input.DueDate, "other", null, input.Items, input.Notes);
+        var bill = await Billing.CreateVendorBillAsync(branchId, input.VendorId, input.BillNo.Trim(), input.BillDate ?? Today, input.DueDate, "other", null, input.Items, input.Notes, buildingId: input.BuildingId);
         await tx.CommitAsync();
         return CreatedAtAction(nameof(Get), new { id = bill.Id }, new { bill.Id, bill.TotalAmount });
     }
@@ -76,6 +83,8 @@ public class VendorBillsController : ApiControllerBase
         EnsureBranchAccess(b.BranchId);
         if ((await Billing.PaidByBillAsync(new[] { id })).GetValueOrDefault(id) > 0) throw new BusinessRuleException("Payments are applied to this bill.");
         if (b.SourceType == "refill_request") throw new BusinessRuleException("This bill belongs to a refill request.");
+        if (await Db.Meters.AnyAsync(m => m.PurchaseBillId == id))
+            throw new BusinessRuleException("Meters are registered from this bill. Remove them from it first, or issue a supplier credit instead.");
         await using var tx = await Db.Database.BeginTransactionAsync();
         if (b.JournalEntryId != null) await Posting.ReverseAsync(b.JournalEntryId.Value, Today, $"Vendor bill {b.BillNo} cancelled");
         b.StatusId = await LkId(LookupTypes.BillStatus, "cancelled");
@@ -133,22 +142,49 @@ public class VendorPaymentsController : ApiControllerBase
         };
         Db.VendorPayments.Add(vp);
         await Db.SaveChangesAsync();
-        var total = 0m;
-        foreach (var a in input.Allocations ?? new())
-        {
-            var bill = await Db.VendorBills.FirstOrDefaultAsync(b => b.Id == a.VendorBillId && b.VendorId == input.VendorId) ?? throw new AppException($"Bill {a.VendorBillId} does not belong to this vendor.");
-            var balance = (bill.TotalAmount ?? 0) - (await Billing.PaidByBillAsync(new[] { bill.Id })).GetValueOrDefault(bill.Id);
-            if (a.Amount <= 0 || a.Amount > balance) throw new AppException($"Allocation for bill {bill.BillNo} must be between 0 and {balance}.");
-            total += a.Amount;
-            Db.VendorPaymentAllocations.Add(new VendorPaymentAllocation { VendorPaymentId = vp.Id, VendorBillId = bill.Id, Amount = a.Amount });
-        }
-        if (total > vp.Amount) throw new AppException("Allocations exceed the payment amount.");
-        await Db.SaveChangesAsync();
+        await AddAllocationsAsync(vp, input.VendorId, input.Allocations, vp.Amount);
         await Billing.RecalcBillsAsync((input.Allocations ?? new()).Select(a => a.VendorBillId));
         vp.JournalEntryId = (await Posting.PostVendorPaymentAsync(vp))?.Id;
         await Db.SaveChangesAsync();
         await tx.CommitAsync();
         return Ok(new { vp.Id, vp.PaymentNo });
+    }
+
+    /// <summary>Allocations must go to open (pending / partial) bills of the same vendor and cannot exceed the bill balance or the free amount.</summary>
+    private async Task AddAllocationsAsync(VendorPayment vp, long vendorId, List<BillAllocation>? allocations, decimal free)
+    {
+        var open = new List<long?>();
+        foreach (var c in new[] { "pending", "partial", "overdue" }) if (await Lookups.IdOrNullAsync(LookupTypes.BillStatus, c) is long x) open.Add(x);
+        var total = 0m;
+        foreach (var a in allocations ?? new())
+        {
+            var bill = await Db.VendorBills.FirstOrDefaultAsync(b => b.Id == a.VendorBillId && b.VendorId == vendorId) ?? throw new AppException($"Bill {a.VendorBillId} does not belong to this vendor.");
+            if (!open.Contains(bill.StatusId)) throw new BusinessRuleException($"Bill {bill.BillNo} is not open (paid, draft or cancelled).");
+            var balance = (bill.TotalAmount ?? 0) - (await Billing.PaidByBillAsync(new[] { bill.Id })).GetValueOrDefault(bill.Id);
+            if (a.Amount <= 0 || a.Amount > balance) throw new AppException($"Allocation for bill {bill.BillNo} must be between 0 and {balance}.");
+            total += a.Amount;
+            Db.VendorPaymentAllocations.Add(new VendorPaymentAllocation { VendorPaymentId = vp.Id, VendorBillId = bill.Id, Amount = a.Amount });
+        }
+        if (total > free) throw new AppException("Allocations exceed the payment amount.");
+        await Db.SaveChangesAsync();
+    }
+
+    /// <summary>Apply the unallocated part of a vendor payment (an advance to the supplier) to open bills of that supplier.</summary>
+    [HttpPost("{id:long}/allocate")]
+    public async Task<IActionResult> Allocate(long id, [FromBody] List<BillAllocation> allocations)
+    {
+        var vp = await Db.VendorPayments.FirstOrDefaultAsync(x => x.Id == id) ?? throw new NotFoundException("VendorPayment", id);
+        EnsureBranchAccess(vp.BranchId);
+        if (await Lookups.CodeAsync(vp.StatusId) is "cancelled" or "bounced") throw new BusinessRuleException("The payment is cancelled.");
+        if (allocations is not { Count: > 0 }) throw new AppException("Choose the bills to pay.");
+        var used = await Db.VendorPaymentAllocations.Where(a => a.VendorPaymentId == id).SumAsync(a => (decimal?)a.Amount) ?? 0;
+        var free = vp.Amount - used;
+        if (free <= 0) throw new BusinessRuleException("The payment is fully allocated.");
+        await using var tx = await Db.Database.BeginTransactionAsync();
+        await AddAllocationsAsync(vp, vp.VendorId, allocations, free);
+        await Billing.RecalcBillsAsync(allocations.Select(a => a.VendorBillId));
+        await tx.CommitAsync();
+        return Ok(new { allocated = allocations.Sum(a => a.Amount), remaining = free - allocations.Sum(a => a.Amount) });
     }
 
     [HttpPost("{id:long}/cancel")]

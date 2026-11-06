@@ -27,7 +27,7 @@ public class DashboardController : ApiControllerBase
 
         var buildings = Db.Buildings.Where(b => all || branches.Contains(b.BranchId));
         var invoices = Db.Invoices.Where(i => (all || branches.Contains(i.BranchId)) && !deadInv.Contains(i.StatusId));
-        var payments = Db.Payments.Where(p => (all || branches.Contains(p.BranchId)) && !deadPay.Contains(p.StatusId));
+        var payments = Db.Payments.Where(p => (all || branches.Contains(p.BranchId)) && !deadPay.Contains(p.StatusId) && p.PaymentMethodId != null);
 
         var invoicedYear = await invoices.Where(i => i.IssueDate >= yearStart).SumAsync(i => i.TotalAmount ?? 0, ct);
         var collectedYear = await payments.Where(p => p.PaymentDate >= yearStart).SumAsync(p => p.Amount, ct);
@@ -67,9 +67,10 @@ public class DashboardController : ApiControllerBase
             .Select(g => new { g.Key.BuildingId, g.Key.Code, g.Key.NameEn, g.Key.NameAr, Litres = g.Sum(t => t.DeliveredQtyLitres ?? 0), Count = g.Count() })
             .OrderByDescending(x => x.Litres).Take(10).ToListAsync(ct);
         var recentRefills = await Db.RefillRequests.Where(r => all || branches.Contains(r.BranchId)).OrderByDescending(r => r.RequestDate).ThenByDescending(r => r.Id).Take(6)
-            .Select(r => new { r.Id, r.RequestNo, r.RequestDate, r.RequestedQtyLitres, r.PriorityId, r.StatusId, r.CurrentStageId, r.Tank!.TankNo, r.Tank.CapacityLitres, r.Tank.CurrentLevelLitres,
+            .Select(r => new { r.Id, r.RequestNo, r.RequestDate, r.RequestedQtyLitres, r.PriorityId, r.StatusId, r.CurrentStageId, r.TankId, r.Tank!.TankNo, r.Tank.CapacityLitres, r.Tank.CurrentLevelLitres,
                                r.Tank.BuildingId, r.Tank.Building!.NameEn, r.Tank.Building.NameAr }).ToListAsync(ct);
 
+        var recentLevels = await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForTanksAsync(recentRefills.Select(r => r.TankId), ct);
         var alerts = await HttpContext.RequestServices.GetRequiredService<AlertsQuery>().GetAsync(30, branches);
 
         // refill workflow counters (dashboard refill cards)
@@ -100,7 +101,8 @@ public class DashboardController : ApiControllerBase
                 collected = collectedYear, collectedGrowth = Growth(colThisMonth, colLastMonth),
                 collectionRate = invoicedYear == 0 ? 0 : Math.Round(collectedYear / invoicedYear * 100, 1),
                 overdue = overdueRows.Sum(x => x.Total - x.Paid), overdueClients = overdueRows.Select(x => x.TenantId).Distinct().Count(),
-                lowTanks = await Db.Tanks.CountAsync(t => (all || branches.Contains(t.BranchId ?? 0)) && t.CapacityLitres > 0 && (t.CurrentLevelLitres ?? 0) * 100 / t.CapacityLitres < TankRules.LowLevelPercent, ct),
+                lowTanks = (await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>()
+                    .ForQueryAsync(Db.Tanks.AsNoTracking().Where(t => (all || branches.Contains(t.BranchId ?? 0)) && t.CapacityLitres > 0), ct)).Values.Count(l => l.IsLow),
                 openServiceRequests = await Db.ServiceRequests.CountAsync(r => (all || branches.Contains(r.BranchId)) && srOpen.Contains(r.StatusId), ct),
             },
             revenue = new
@@ -119,7 +121,7 @@ public class DashboardController : ApiControllerBase
                                                               status = Code(r.StatusId), priority = Code(r.PriorityId), r.RequestedAt }),
             refillByBuilding = refillByBuilding.Select(x => new { x.BuildingId, x.Code, building = Loc(x.NameEn, x.NameAr), litres = x.Litres, refills = x.Count }),
             recentRefills = recentRefills.Select(r => new { r.Id, r.RequestNo, r.RequestDate, qty = r.RequestedQtyLitres, r.TankNo, r.BuildingId, building = Loc(r.NameEn, r.NameAr),
-                                                           levelPct = r.CapacityLitres > 0 ? Math.Round((r.CurrentLevelLitres ?? 0) / r.CapacityLitres * 100, 1) : 0,
+                                                           levelPct = recentLevels.GetValueOrDefault(r.TankId)?.Pct ?? (r.CapacityLitres > 0 ? Math.Round((r.CurrentLevelLitres ?? 0) / r.CapacityLitres * 100, 1) : 0),
                                                            priority = Code(r.PriorityId), status = Code(r.StatusId), stage = Code(r.CurrentStageId) }),
             refillStats,
             notifications = alerts.Take(10),
@@ -157,7 +159,8 @@ public class DashboardSummaryController : ApiControllerBase
         static DateTimeOffset Ts(DateOnly d) => new(d.ToDateTime(TimeOnly.MinValue), TimeSpan.FromHours(4));
 
         var invoices = Db.Invoices.AsNoTracking().Where(i => (all || br.Contains(i.BranchId)) && !deadInv.Contains(i.StatusId));
-        var payments = Db.Payments.AsNoTracking().Where(p => (all || br.Contains(p.BranchId)) && !deadPay.Contains(p.StatusId));
+        // money actually received: a deposit applied to invoices at move-out (receipt without a payment method) is an offset, not a collection
+        var payments = Db.Payments.AsNoTracking().Where(p => (all || br.Contains(p.BranchId)) && !deadPay.Contains(p.StatusId) && p.PaymentMethodId != null);
         var deadBill = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "cancelled");
         var draftBill = await Lookups.IdOrNullAsync(LookupTypes.BillStatus, "draft");
         var bills = Db.VendorBills.AsNoTracking().Where(b => (all || br.Contains(b.BranchId)) && b.StatusId != deadBill && b.StatusId != draftBill);
@@ -280,9 +283,12 @@ public class DashboardSummaryController : ApiControllerBase
         var refillCancelled = await Lookups.IdOrNullAsync(LookupTypes.RefillStatus, "cancelled");
         var pipeline = await Db.RefillRequests.AsNoTracking().Where(r => (all || br.Contains(r.BranchId)) && r.StatusId != refillDone && r.StatusId != refillCancelled)
             .GroupBy(r => r.CurrentStageId).Select(g => new { g.Key, Count = g.Count() }).ToListAsync(ct);
-        var tanks = await Db.Tanks.AsNoTracking().Where(x => (all || br.Contains(x.BranchId ?? 0)) && x.CapacityLitres > 0)
-            .Select(x => new { x.Id, x.TankNo, x.BuildingId, x.Building!.Code, x.Building.NameEn, x.Building.NameAr, Pct = (x.CurrentLevelLitres ?? 0) * 100 / x.CapacityLitres })
-            .OrderBy(x => x.Pct).Take(5).ToListAsync(ct);
+        // tank levels = gas in the tank now (last measurement − meter usage since), the same figure as the building page
+        var tankQuery = Db.Tanks.AsNoTracking().Where(x => (all || br.Contains(x.BranchId ?? 0)) && x.CapacityLitres > 0);
+        var tankLevels = await HttpContext.RequestServices.GetRequiredService<TankLevelEstimator>().ForQueryAsync(tankQuery, ct);
+        var tankInfo = await tankQuery.Select(x => new { x.Id, x.TankNo, x.BuildingId, x.Building!.Code, x.Building.NameEn, x.Building.NameAr }).ToListAsync(ct);
+        var tanks = tankInfo.Select(x => new { x.Id, x.TankNo, x.BuildingId, x.Code, x.NameEn, x.NameAr, Pct = tankLevels.GetValueOrDefault(x.Id)?.Pct ?? 0 })
+            .OrderBy(x => x.Pct).Take(5).ToList();
         var operations = new
         {
             openServiceRequests = await Db.ServiceRequests.CountAsync(r => (all || br.Contains(r.BranchId)) && srOpenIds.Contains(r.StatusId), ct),
@@ -290,16 +296,17 @@ public class DashboardSummaryController : ApiControllerBase
             refillPipeline = pipeline.Select(p => new { stage = Code(p.Key), label = Label(p.Key), count = p.Count }).OrderBy(p => p.stage).ToList(),
             lowestTanks = tanks.Select(x => new { x.Id, tankNo = x.TankNo, x.BuildingId, code = x.Code, building = Loc(x.NameEn, x.NameAr), levelPct = Math.Round(x.Pct, 1),
                                                   low = x.Pct < TankRules.LowLevelPercent }),
-            lowTanks = await Db.Tanks.CountAsync(x => (all || br.Contains(x.BranchId ?? 0)) && x.CapacityLitres > 0 && (x.CurrentLevelLitres ?? 0) * 100 / x.CapacityLitres < TankRules.LowLevelPercent, ct),
+            lowTanks = tankLevels.Values.Count(l => l.IsLow),
         };
 
         // ---- cash & bank balance (posted journals on accounts 11xx) ----
         decimal? cash = null;
         try
         {
-            var posted = await Lookups.IdOrNullAsync(LookupTypes.JournalStatus, "posted");
+            // same rule as the trial balance: every non-draft entry counts (a reversed entry and its reversal net to zero)
+            var draft = await Lookups.IdOrNullAsync(LookupTypes.JournalStatus, "draft");
             cash = await Db.JournalLines.AsNoTracking()
-                .Where(l => l.Account!.AccountCode.StartsWith("11") && l.JournalEntry!.StatusId == posted && (all || br.Contains(l.JournalEntry.BranchId)))
+                .Where(l => l.Account!.AccountCode.StartsWith("11") && l.JournalEntry!.StatusId != draft && (all || br.Contains(l.JournalEntry.BranchId)))
                 .SumAsync(l => (decimal?)((l.Debit ?? 0) - (l.Credit ?? 0)), ct) ?? 0;
         }
         catch { /* accounting not set up */ }

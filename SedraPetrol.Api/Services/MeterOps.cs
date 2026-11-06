@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using SedraPetrol.Api.Common;
 using SedraPetrol.Api.Data;
 using SedraPetrol.Api.Domain.Entities;
@@ -19,8 +19,63 @@ public class MeterOps
     private readonly AppDbContext _db;
     private readonly LookupService _lookups;
     private readonly ICurrentUser _user;
+    private readonly PostingService _posting;
 
-    public MeterOps(AppDbContext db, LookupService lookups, ICurrentUser user) { _db = db; _lookups = lookups; _user = user; }
+    public MeterOps(AppDbContext db, LookupService lookups, ICurrentUser user, PostingService posting) { _db = db; _lookups = lookups; _user = user; _posting = posting; }
+
+    // ------------------------------------------------------------------ meter cost in the ledger
+
+    /// <summary>
+    /// Moves a meter's purchase cost between the ledger accounts as the meter moves:
+    /// stock (FEE_TYPE meter_purchase bill account, 1402 meters in stock) ⇄ installed (FEE_TYPE fixed_asset account, 1501 fixed assets)
+    /// → written_off (5105 meter write-offs). Meters registered without a purchase bill (no cost location) are not posted.
+    /// A meter is never moved twice: cost_location records where its cost is now.
+    /// </summary>
+    public async Task MoveCostAsync(Meter m, string to, DateOnly date, long? buildingId, string why)
+    {
+        if ((m.PurchaseCost ?? 0) <= 0 || m.CostLocation == null || m.CostLocation == to) return;
+        var companyId = await _db.Branches.Where(b => b.Id == m.BranchId).Select(b => (long?)b.CompanyId).FirstOrDefaultAsync()
+                        ?? await _db.Companies.Select(c => c.Id).FirstAsync();
+        async Task<long> BillAccount(string fee)
+        {
+            var key = await _lookups.IdOrNullAsync(LookupTypes.FeeType, fee);
+            return await _db.AccountMappings.Where(x => x.CompanyId == companyId && x.SourceType == MappingSources.VendorBillItem && x.SourceKeyId == key && x.IsActive)
+                       .Select(x => x.DebitAccountId).FirstOrDefaultAsync()
+                   ?? throw new BusinessRuleException($"No ledger account is set up for «{fee}» bill items. Set it under Accounting > Account mappings.");
+        }
+        async Task<long> Acc(string loc) => loc switch
+        {
+            "stock" => await BillAccount("meter_purchase"),
+            "installed" => await BillAccount("fixed_asset"),
+            "written_off" => await _db.Accounts.Where(a => a.CompanyId == companyId && a.AccountCode == "5105").Select(a => (long?)a.Id).FirstOrDefaultAsync()
+                             ?? throw new BusinessRuleException("Account 5105 (meter write-offs) is missing in the chart of accounts."),
+            _ => throw new AppException($"Unknown meter cost location «{loc}»."),
+        };
+        var cost = m.PurchaseCost!.Value;
+        var text = $"Meter {m.MeterNo} ({m.SerialNo}): {why}";
+        await _posting.CreateEntryAsync(m.BranchId!.Value, date, text, "meter_cost", m.Id, new[]
+        {
+            new PostingService.Line(await Acc(to), cost, 0, text, buildingId),
+            new PostingService.Line(await Acc(m.CostLocation), 0, cost, text, buildingId),
+        }, true);
+        m.CostLocation = to;
+        await _db.SaveChangesAsync();
+    }
+
+    /// <summary>
+    /// Meter readings typed by users (single or bulk) are refused while the meter is damaged, faulty, lost or retired: its index cannot be trusted.
+    /// Service readings (final reading when it is removed / replaced, contract closing) still go through AddReadingAsync directly.
+    /// </summary>
+    public async Task EnsureAcceptsReadingsAsync(Meter meter)
+    {
+        var status = await _lookups.CodeAsync(meter.StatusId);
+        if (status is "damaged" or "fault" or "lost" or "retired")
+            throw new BusinessRuleException($"Meter {meter.MeterNo} is marked «{await StatusNameAsync(meter.StatusId)}», so readings are not accepted. " +
+                                            "Repair it (change its status back to working) or replace the meter first.", "meter_not_readable");
+    }
+
+    private async Task<string> StatusNameAsync(long? statusId) =>
+        await _db.LookupValues.Where(v => v.Id == statusId).Select(v => v.NameEn ?? v.Code).FirstOrDefaultAsync() ?? "not working";
 
     /// <summary>A reading time for a business date: now when it is today, otherwise noon of that day.</summary>
     public static DateTimeOffset At(DateOnly d) =>
@@ -95,6 +150,9 @@ public class MeterOps
         meter.StatusId = await _lookups.IdOrNullAsync(LookupTypes.MeterStatus, "active") ?? meter.StatusId;
         meter.InstallDate = from;
         await _db.SaveChangesAsync();
+        // its cost leaves stock and becomes a fixed asset of the building
+        var u = await _db.Units.Where(x => x.Id == unitId).Select(x => new { x.BuildingId, x.UnitNo }).FirstAsync();
+        await MoveCostAsync(meter, "installed", from, u.BuildingId, $"installed in unit {u.UnitNo}");
     }
 
     /// <summary>Removes the meter from its unit. Not allowed while the unit is rented (replace the meter instead).</summary>
@@ -112,6 +170,7 @@ public class MeterOps
         if (await _lookups.CodeAsync(meter.StatusId) is null or "active")
             meter.StatusId = await _lookups.IdOrNullAsync(LookupTypes.MeterStatus, "in_stock") ?? meter.StatusId;
         await _db.SaveChangesAsync();
+        await MoveCostAsync(meter, "stock", to, await _db.Units.Where(x => x.Id == a.UnitId).Select(x => (long?)x.BuildingId).FirstOrDefaultAsync(), "removed from the unit");
     }
 
     public async Task SetStatusAsync(Meter meter, string code) =>
